@@ -1,0 +1,40 @@
+# --- Never commit runtime data or secrets ---
+# The live config holds real URLs / auth tokens; only the template is tracked.
+config.json
+# Simulator runtime data (received documents, SQLite db, admin token)
+simulator/data/
+received/
+failed/
+log.txt
+# Hub runtime data: admin_token.txt, enroll_key.txt, hub.db, held/ PDFs, config.json
+hub/data/
+# Console-run log (run.bat prints the admin token + enroll key to stdout on
+# startup; if that's redirected to a file it must never be committed) and the
+# auto-generated, machine-specific service launcher (Write-Launcher in
+# install-hub-service.ps1 bakes in this machine's absolute paths).
+hub/runtime.log
+hub/run-hub-service.cmd
+*.log
+
+# --- Python / venv ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+# Private CPython install provisioned at install time (hub) - large,
+# machine-specific, and re-provisioned by install-hub-service.ps1. (The client's
+# equivalent lives outside the repo, under %ProgramData%\VirtualCloudPrinter.)
+hub/python/
+
+# --- Vendored binaries (users add these themselves, or vendor/fetch-win7-bundle.ps1) ---
+vendor/*.dll
+vendor/*.exe
+vendor/*.zip
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

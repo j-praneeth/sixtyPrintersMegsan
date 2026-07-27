@@ -1,0 +1,320 @@
+﻿Virtual Cloud Printer diagnostics - 07/24/2026 15:20:30
+
+Refreshed upload.py + prompt-id.ps1 and re-applied job ACLs (spool write + interpreter RX).
+Spooler restarted; stuck jobs cleared; mfilemon debug logging enabled.
+
+Monitor: Multi File Port Monitor
+
+=== $Base ACL (does SYSTEM have access?) ===
+C:\ProgramData\VirtualCloudPrinter BUILTIN\Administrators:(OI)(CI)(F)
+                                   NT AUTHORITY\SYSTEM:(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+
+=== spool ACL ===
+C:\ProgramData\VirtualCloudPrinter\spool NT AUTHORITY\Authenticated Users:(CI)(RX,W)
+                                         BUILTIN\Administrators:(F)
+                                         CREATOR OWNER:(OI)(CI)(IO)(F)
+                                         BUILTIN\Administrators:(I)(OI)(CI)(F)
+                                         NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+
+=== Printers on our port ===
+
+
+Name          : hui
+DriverName    : MS Publisher Color Printer
+PortName      : VirtualCloudPrinter:
+PrinterStatus : Normal
+
+=== Port registry values (UserCommand etc.) ===
+
+
+OutputPath      : C:\ProgramData\VirtualCloudPrinter\spool
+FilePattern     : %Y-%m-%d_%H-%n-%s_%i.ps
+Overwrite       : 0
+UserCommand     : "C:\ProgramData\VirtualCloudPrinter\venv\Scripts\pythonw.exe" -P 
+                  "C:\ProgramData\VirtualCloudPrinter\upload.py" "%f" "%j" "%r" "%u" "%t"
+ExecPath        : C:\ProgramData\VirtualCloudPrinter
+WaitTermination : 0
+WaitTimeout     : 0
+PipeData        : 0
+HideProcess     : 1
+User            : 
+Domain          : 
+Password        :
+
+=== config.json ===
+{
+    "_comment":  "Virtual Cloud Printer configuration (v2). One entry per printer under \u0027printers\u0027. The key MUST match the printer name exactly as it appears in the Windows print dialog. A printer entry WITH \u0027device_name\u0027+\u0027token\u0027 is a hub printer (catalog prompt + metadata upload to the LAN hub); an entry without them is a legacy printer and just POSTs docname + file to its \u0027url\u0027.",
+    "_hub_comment":  "LAN hub that enrolls devices, receives jobs and serves the registration catalog. \u0027catalog_share_dir\u0027 is the share-file fallback the user-session prompt reads when the hub HTTP catalog is unreachable.",
+    "printers":  {
+                     "limsKaaPrinter":  {
+                                            "url":  "http://127.0.0.1:8000/ingest/545QCfT7O5I67-ANYmYgfTUWy6YtvlCj",
+                                            "docname_field":  "docname",
+                                            "file_field":  "file",
+                                            "extra_fields":  {
+
+                                                             },
+                                            "headers":  {
+
+                                                        },
+                                            "verify_tls":  true,
+                                            "token":  "545QCfT7O5I67-ANYmYgfTUWy6YtvlCj",
+                                            "device_name":  "gcms-23",
+                                            "device_type":  "gcms",
+                                            "pdf_encryption":  {
+                                                                   "enabled":  true,
+                                                                   "password_dpapi":  "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAyvdS0C1+EkWZCYRwZgXHLAQAAAACAAAAAAAQZgAAAAEAACAAAABb1wZbHMlyS7gLGR8CmveCeYqLk4ZezdVtl0n0rL/dYwAAAAAOgAAAAAIAACAAAAAz4Ckqa0vjB2HY+ZePUU+XszWeSpbv9lKi52P5IkfW0BAAAADDQAkQRHQkqFxcbdK37MFSQAAAAI7/K5wajMR+oaYm9z6a9CiTOGk4w7GOPBJIPTgQa4+KwBbdME/6cjvZ7ZN2PkrV6hMvneyGGZEtZIsc07yy4Ig="
+                                                               }
+                                        },
+                     "dekhoAPrinter":  {
+                                           "url":  "http://127.0.0.1:8000/ingest/KlfXKWGUzywEJFDbNts7mol15pUTH1KD",
+                                           "docname_field":  "docname",
+                                           "file_field":  "file",
+                                           "extra_fields":  {
+
+                                                            },
+                                           "headers":  {
+
+                                                       },
+                                           "verify_tls":  true,
+                                           "token":  "KlfXKWGUzywEJFDbNts7mol15pUTH1KD",
+                                           "device_name":  "mh-2-34-24",
+                                           "device_type":  "gcms",
+                                           "pdf_encryption":  {
+                                                                  "enabled":  true,
+                                                                  "password_dpapi":  "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAyvdS0C1+EkWZCYRwZgXHLAQAAAACAAAAAAAQZgAAAAEAACAAAABs9TEUnLGP5uxZsVGbr/DIXqLpzPy3e1fUNVI6bbtEmwAAAAAOgAAAAAIAACAAAADQw+DZHt/Qf8Uee5YyBOIbLShDAUafX/uFSyXr/Yu26SAAAAAaVrzskS5cw7jJVX0vra0TlUA51+l6OmoHrlszw+Z0HkAAAAA+ejRlvErk0XZNq1NXHXHv7vg8lBgXdTWnLaMA58/TwIFggfNirNH2wLRFROhT5MND6ubIpY5wdOV1HKxUSJIz"
+                                                              }
+                                       },
+                     "hhii":  {
+                                  "url":  "http://127.0.0.1:8000/ingest/g7IVfRBiWwypldVT7MjE_N7wJHAyxrsT",
+                                  "docname_field":  "docname",
+                                  "file_field":  "file",
+                                  "extra_fields":  {
+
+                                                   },
+                                  "headers":  {
+
+                                              },
+                                  "verify_tls":  true,
+                                  "token":  "g7IVfRBiWwypldVT7MjE_N7wJHAyxrsT",
+                                  "device_name":  "hhiihhii",
+                                  "device_type":  "gcms",
+                                  "pdf_encryption":  {
+                                                         "enabled":  true,
+                                                         "password_dpapi":  "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAyvdS0C1+EkWZCYRwZgXHLAQAAAACAAAAAAAQZgAAAAEAACAAAACQC6HcFehoMaImlRFodCav30V0deTbXvQ4C+iqXPBL8gAAAAAOgAAAAAIAACAAAAD9Nyati3YYqdbqc9ikzKiP8UEMkDhqgE8wC0A9ZWuKVBAAAAAjiHVDYDKys484zi5C4FezQAAAACSS+0RpETHyKjrGP6Oh0ZnAid8nNczntuywPOgkBauwP2Y14s0/jIn5CZAEvYwZ8W16tZctzUJTHCLV3XKIrDg="
+                                                     }
+                              },
+                     "hui":  {
+                                 "url":  "http://127.0.0.1:8000/ingest/NbGCbtMe8YUhyMPMJYqc2EBSGqQAPmcz",
+                                 "docname_field":  "docname",
+                                 "file_field":  "file",
+                                 "extra_fields":  {
+
+                                                  },
+                                 "headers":  {
+
+                                             },
+                                 "verify_tls":  true,
+                                 "token":  "NbGCbtMe8YUhyMPMJYqc2EBSGqQAPmcz",
+                                 "device_name":  "huio123",
+                                 "device_type":  "gcms",
+                                 "pdf_encryption":  {
+                                                        "enabled":  true,
+                                                        "password_dpapi":  "AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAAyvdS0C1+EkWZCYRwZgXHLAQAAAACAAAAAAAQZgAAAAEAACAAAAC500oz3I0ZhmJ6bC0jfqUBM4p/B6lQMIP4hz5oNzCYnwAAAAAOgAAAAAIAACAAAACF2PL8k6Jb8+t69igoAiHg5Wx4bNPSBpU+iMRhDDFGNBAAAAAm8rEsYwsVd7oU6MYqZ/HGQAAAAH5iJFPB99gqZHZE5fMh4eiDveK0uBwVNKspgHjxQ2/tWgJmzVl8H3a0v2jyQAI/5ZtsmKW0f+OToz3+rB5MtrU="
+                                                    }
+                             }
+                 },
+    "_super_admin_comment":  "PBKDF2-SHA256 record {algo, iterations, salt, hash} written by setup.ps1 (seeded on install; rotate with set-super-admin.bat). NEVER store a plaintext password here.",
+    "default_url":  "",
+    "docname_field":  "docname",
+    "file_field":  "file",
+    "registration_field":  "registration_number",
+    "extra_fields":  {
+
+                     },
+    "headers":  {
+
+                },
+    "prompt_registration":  true,
+    "prompt_timeout_seconds":  180,
+    "_prompt_batch_comment":  "When one user\u0027s app prints several PDFs at once (N concurrent jobs on the same printer), show ONE registration dialog and apply its answer (or its Skip) to every job that arrives while the dialog is open or within prompt_batch_window_seconds of it opening. Keep the window short: a later unrelated print should re-prompt, never silently inherit the previous number. Set prompt_batch to false to get one dialog per document again.",
+    "prompt_batch":  true,
+    "prompt_batch_window_seconds":  45,
+    "_pdf_encryption_comment":  "GLOBAL fallback: encrypt each PDF with AES-256 (via qpdf, lossless - no quality loss). Per-printer pdf_encryption (with \u0027password_dpapi\u0027, a DPAPI-protected blob managed by change-password.bat) overrides this. Resolution order in upload.py: printer password_dpapi -\u003e printer password -\u003e VCP_PDF_PASSWORD machine env var -\u003e this block. If enabled with no resolvable passphrase, or qpdf is missing, jobs are preserved in failed\\ rather than sent unencrypted.",
+    "pdf_encryption":  {
+                           "enabled":  false,
+                           "password":  ""
+                       },
+    "verify_tls":  true,
+    "timeout_seconds":  60,
+    "retry_count":  2,
+    "retry_delay_seconds":  3,
+    "super_admin":  {
+                        "algo":  "pbkdf2-sha256",
+                        "iterations":  200000,
+                        "salt":  "Ozt0KoGMjYkjjedtP0WW2A==",
+                        "hash":  "EHuUR6ur3j598nd7AcAnr18Dwk2v4xEWY1yoMAC91N4="
+                    },
+    "ghostscript_path":  "C:\\Program Files\\gs\\gs10.07.1\\bin\\gswin64c.exe",
+    "qpdf_path":  "C:\\ProgramData\\VirtualCloudPrinter\\qpdf\\qpdf-12.3.2-mingw64\\bin\\qpdf.exe",
+    "hub":  {
+                "base_url":  "http://127.0.01:8000",
+                "verify_tls":  true
+            },
+    "catalog_share_dir":  "\\\\127.0.0.1\\limsDocs\\.vcp\\catalog"
+}
+
+=== prompt-id.ps1 presence + ACL (can print user read it?) ===
+present
+C:\ProgramData\VirtualCloudPrinter\prompt-id.ps1 NT AUTHORITY\Authenticated Users:(RX)
+                                                 BUILTIN\Administrators:(I)(F)
+                                                 NT AUTHORITY\SYSTEM:(I)(F)
+
+Successfully processed 1 files; Failed processing 0 files
+
+=== ids\ contents (.prompt / .err files reveal dialog outcome) ===
+
+Name                            Length LastWriteTime      
+----                            ------ -------------      
+91797.dekhoAPrinter.batch.json     122 24-07-2026 12:54:26
+91797.hhii.batch.json              130 24-07-2026 13:33:28
+91797.hui.batch.json               131 24-07-2026 15:19:12
+91797.limsKaaPrinter.batch.json     83 24-07-2026 09:22:41
+
+=== interpreters (legacy OS: False) ===
+  python.exe : True (C:\ProgramData\VirtualCloudPrinter\venv\Scripts\python.exe)
+  pythonw.exe: True (C:\ProgramData\VirtualCloudPrinter\venv\Scripts\pythonw.exe)
+  base pythonw.exe: C:\ProgramData\VirtualCloudPrinter\python\cpython-3.12-windows-x86_64-none\pythonw.exe
+
+=== pyvenv.cfg ===
+home = C:\ProgramData\VirtualCloudPrinter\python\cpython-3.12-windows-x86_64-none
+implementation = CPython
+uv = 0.11.29
+version_info = 3.12
+include-system-site-packages = false
+relocatable = true
+
+=== interpreter smoke test (python -P -c import ...) ===
+PYTHON_OK 3.12.13 (main, Jun 23 2026, 15:23:43) [MSC v.1944 64 bit (AMD64)]
+exit=0
+
+=== spool\ contents (did any .ps get written?) ===
+
+
+=== direct launch test via venv pythonw ===
+  RESULT: upload.py RAN (log.txt 18224 -> 18735 bytes). Interpreter + command are GOOD.
+
+=== direct launch test via base pythonw ===
+  RESULT: upload.py RAN (log.txt 18735 -> 19246 bytes). Interpreter + command are GOOD.
+
+=== log.txt (last 60 lines) ===
+2026-07-24 13:33:09  Attached registration_number='sd/sd/sd/f/sf/sf/fs' test='dsf'.
+2026-07-24 13:33:09  Upload OK (HTTP 200) on attempt 1 -> http://127.0.0.1:8000/ingest/g7IVfRBiWwypldVT7MjE_N7wJHAyxrsT
+2026-07-24 13:33:09  ---- job done ----
+2026-07-24 13:33:13  ---- job start ---- printer='hhii' doc='LIMS Print Hub' jobid='4' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_13-33-13_0001.ps'
+2026-07-24 13:33:13  Batch prompt: job 4 reusing the batch answer from job 3 (reg='sd/sd/sd/f/sf/sf/fs').
+2026-07-24 13:33:14  Converted to PDF: C:\ProgramData\VirtualCloudPrinter\spool\2026-07-24_13-33-13_0001.pdf (74178 bytes)
+2026-07-24 13:33:14  Encrypted PDF with AES-256 (qpdf): C:\ProgramData\VirtualCloudPrinter\spool\2026-07-24_13-33-13_0001.pdf (73887 bytes)
+2026-07-24 13:33:14  Attached registration_number='sd/sd/sd/f/sf/sf/fs' test='dsf'.
+2026-07-24 13:33:14  Upload OK (HTTP 200) on attempt 1 -> http://127.0.0.1:8000/ingest/g7IVfRBiWwypldVT7MjE_N7wJHAyxrsT
+2026-07-24 13:33:14  ---- job done ----
+2026-07-24 13:33:23  ---- job start ---- printer='hhii' doc='LIMS Print Hub' jobid='5' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_13-33-23_0001.ps'
+2026-07-24 13:33:23  Batch prompt: job 5 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 13:33:23  Catalog fetched from hub (2 registrations).
+2026-07-24 13:33:23  Registration prompt: launched dialog in session 1 (pid 27408); waiting.
+2026-07-24 13:33:28  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 13:33:28  ---- job cancelled ----
+2026-07-24 14:30:43  ---- job start ---- printer='hui' doc='ChatGPT' jobid='2' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_14-30-43_0001.ps'
+2026-07-24 14:30:43  Batch prompt: job 2 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 14:30:43  Catalog fetch failed (prompt will use the share fallback): <urlopen error [Errno 11001] getaddrinfo failed>
+2026-07-24 14:30:44  Registration prompt: launched dialog in session 1 (pid 9204); waiting.
+2026-07-24 14:30:48  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 14:30:48  ---- job cancelled ----
+2026-07-24 14:31:02  ---- job start ---- printer='hui' doc='LIMS Print Hub' jobid='3' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_14-31-01_0001.ps'
+2026-07-24 14:31:02  Batch prompt: job 3 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 14:31:02  Catalog fetch failed (prompt will use the share fallback): <urlopen error [Errno 11001] getaddrinfo failed>
+2026-07-24 14:31:02  Registration prompt: launched dialog in session 1 (pid 15660); waiting.
+2026-07-24 14:31:08  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 14:31:08  ---- job cancelled ----
+2026-07-24 14:31:26  ---- job start ---- printer='hui' doc='LIMS Print Hub' jobid='4' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_14-31-26_0001.ps'
+2026-07-24 14:31:26  Batch prompt: job 4 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 14:31:26  Catalog fetch failed (prompt will use the share fallback): <urlopen error [Errno 11001] getaddrinfo failed>
+2026-07-24 14:31:26  Registration prompt: launched dialog in session 1 (pid 27160); waiting.
+2026-07-24 14:31:29  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 14:31:29  ---- job cancelled ----
+2026-07-24 15:18:19  ---- job start ---- printer='hui' doc='LIMS Print Hub' jobid='5' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_15-18-19_0001.ps'
+2026-07-24 15:18:19  Batch prompt: job 5 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 15:18:19  Catalog fetch failed (prompt will use the share fallback): <urlopen error [Errno 11001] getaddrinfo failed>
+2026-07-24 15:18:19  Registration prompt: launched dialog in session 1 (pid 23348); waiting.
+2026-07-24 15:18:24  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 15:18:24  ---- job cancelled ----
+2026-07-24 15:18:59  ---- job start ---- printer='hui' doc='LIMS Print Hub' jobid='6' user='91797' ps='C:\\ProgramData\\VirtualCloudPrinter\\spool\\2026-07-24_15-18-58_0001.ps'
+2026-07-24 15:18:59  Batch prompt: job 6 is the batch leader - showing one dialog for the whole batch.
+2026-07-24 15:18:59  Catalog fetch failed (prompt will use the share fallback): <urlopen error [Errno 11001] getaddrinfo failed>
+2026-07-24 15:18:59  Registration prompt: launched dialog in session 1 (pid 3652); waiting.
+2026-07-24 15:19:12  Job CANCELLED by the user at the registration prompt - discarded (not uploaded, not preserved).
+2026-07-24 15:19:12  ---- job cancelled ----
+2026-07-24 15:20:39  ---- job start ---- printer='limsTry' doc='diagnostic test' jobid='0' user='91797' ps='C:\\__vcp_nonexistent__.ps'
+2026-07-24 15:20:39  ERROR: PostScript spool file not found: 'C:\\__vcp_nonexistent__.ps'
+2026-07-24 15:20:39  Traceback (most recent call last):
+  File "C:\ProgramData\VirtualCloudPrinter\upload.py", line 994, in main
+    raise RuntimeError("PostScript spool file not found: %r" % ps_file)
+RuntimeError: PostScript spool file not found: 'C:\\__vcp_nonexistent__.ps'
+
+2026-07-24 15:20:42  ---- job start ---- printer='limsTry' doc='diagnostic test' jobid='0' user='91797' ps='C:\\__vcp_nonexistent__.ps'
+2026-07-24 15:20:42  ERROR: PostScript spool file not found: 'C:\\__vcp_nonexistent__.ps'
+2026-07-24 15:20:42  Traceback (most recent call last):
+  File "C:\ProgramData\VirtualCloudPrinter\upload.py", line 994, in main
+    raise RuntimeError("PostScript spool file not found: %r" % ps_file)
+RuntimeError: PostScript spool file not found: 'C:\\__vcp_nonexistent__.ps'
+
+=== failed/ contents ===
+
+
+=== Ghostscript resolves? ===
+config ghostscript_path = 'C:\Program Files\gs\gs10.07.1\bin\gswin64c.exe'  exists=True
+
+=== mfilemon.log tail (System32) ===
+24-07-2026 14:31:26.486  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 14:31:26.487  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 14:31:26.490  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 14:31:26.490  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 14:31:26.490  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 14:31:26.490  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 14:31:26.490  [DEBUG] MfmEndDocPort called (VirtualCloudPrinter:)
+24-07-2026 14:31:26.499  [DEBUG] MfmEndDocPort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:19.070  [DEBUG] MfmStartDocPort called (VirtualCloudPrinter:)
+24-07-2026 15:18:19.072  [DEBUG] MfmStartDocPort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:19.091  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 15:18:19.092  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:19.092  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 15:18:19.092  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:19.092  [DEBUG] MfmEndDocPort called (VirtualCloudPrinter:)
+24-07-2026 15:18:19.108  [DEBUG] MfmEndDocPort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:58.907  [DEBUG] MfmStartDocPort called (VirtualCloudPrinter:)
+24-07-2026 15:18:58.908  [DEBUG] MfmStartDocPort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:58.920  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 15:18:58.921  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:58.921  [DEBUG] MfmWritePort called (VirtualCloudPrinter:)
+24-07-2026 15:18:58.921  [DEBUG] MfmWritePort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:18:58.921  [DEBUG] MfmEndDocPort called (VirtualCloudPrinter:)
+24-07-2026 15:18:58.930  [DEBUG] MfmEndDocPort returning TRUE (VirtualCloudPrinter:)
+24-07-2026 15:20:37.518  [NONE] *** MFILEMON log start ***
+24-07-2026 15:20:37.522  [NONE] MFILEMON is running on Windows XP or above
+24-07-2026 15:20:37.523  [INFO] Initializing port VirtualCloudPrinter:
+24-07-2026 15:20:37.523  [INFO]  Output path:         C:\ProgramData\VirtualCloudPrinter\spool
+24-07-2026 15:20:37.523  [INFO]  File pattern:        %Y-%m-%d_%H-%n-%s_%i.ps
+24-07-2026 15:20:37.523  [INFO]  Overwrite:           false
+24-07-2026 15:20:37.523  [INFO]  User command:        "C:\ProgramData\VirtualCloudPrinter\venv\Scripts\pythonw.exe" -P "C:\ProgramData\VirtualCloudPrinter\upload.py" "%f" "%j" "%r" "%u" "%t"
+24-07-2026 15:20:37.523  [INFO]  Execute from:        C:\ProgramData\VirtualCloudPrinter
+24-07-2026 15:20:37.523  [INFO]  Wait termination:    false
+24-07-2026 15:20:37.523  [INFO]  Wait timeout:        0
+24-07-2026 15:20:37.523  [INFO]  Use pipe:            false
+24-07-2026 15:20:37.523  [INFO]  Run as:              .\
+24-07-2026 15:20:37.523  [INFO] CPortList::AddMfmPort: port VirtualCloudPrinter: up and running
+24-07-2026 15:20:37.523  [DEBUG] InitializePrintMonitor2 successfully initialized MFILEMON
+24-07-2026 15:20:37.659  [DEBUG] MfmOpenPort called (VirtualCloudPrinter:)
+24-07-2026 15:20:37.659  [DEBUG] MfmOpenPort returning TRUE (VirtualCloudPrinter:)

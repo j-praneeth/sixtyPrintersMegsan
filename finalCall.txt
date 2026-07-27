@@ -1,0 +1,56 @@
+robocopy "C:\Users\91797\Downloads\virtualPrinterMegsan-main\hub" "C:\LIMSHub" /E
+
+
+
+LIMS Print Pipeline — production, end to end
+Three machines: ① Cloud LIMS (Supabase + browser) · ② Central hub (192.168.1.172) · ③ the 60 client PCs.
+
+Phase 0 — Prerequisites (once)
+Central desktop: Windows 10/11 x64, internet, will host the limsDocs share.
+Client PCs: Windows 10/11 x64, on the LAN, no internet needed.
+Decide: cloud mode (Supabase) or local mode (no cloud — catalog managed on the hub, documents still filed to limsDocs). You can start local and add cloud later; queued jobs forward automatically.
+Phase 1 — Cloud LIMS (skip for local mode)
+Create a project at supabase.com. Copy the Project URL, anon key, service_role key (Settings → API).
+SQL Editor → paste lims/supabase/schema.sql → Run.
+Authentication → enable Email; add a login for each tester.
+Tester web app (any host with internet):
+cd lims\web
+copy .env.example .env      # set VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY
+npm install
+npm run build               # host dist\  (or npm run dev)
+Phase 2 — Central hub, 24/7 service (on 192.168.1.172)
+Hub lives at C:\LIMSHub (already there). Create + share the docs folder:
+mkdir C:\limsDocs
+Explorer → C:\limsDocs → Properties → Sharing → share as limsDocs, grant lab users Read. Clients then see \\192.168.1.172\limsDocs.
+
+Free port 8000 — if a leftover hub is running, reboot (clears it).
+Double-click C:\LIMSHub\install-hub-service.bat → approve UAC. It builds the venv, registers the auto-start/auto-restart service (LocalSystem, headless, tokens hidden), and starts it.
+Verify:
+powershell -ExecutionPolicy Bypass -File C:\LIMSHub\install-hub-service.ps1 -Action status
+→ Running + Health: HTTP 200 (ok).
+
+Open http://localhost:8000/ → paste the admin token from C:\LIMSHub\data\admin_token.txt → Settings: set limsDocs directory = C:\limsDocs; for cloud mode add the Supabase URL + service_role key; Save.
+Firewall — let the 60 clients reach it:
+netsh advfirewall firewall add rule name="LIMS Print Hub 8000" dir=in action=allow protocol=TCP localport=8000
+Reboot once and confirm http://localhost:8000/healthz returns ok without logging in — that proves 24/7 auto-start.
+Phase 3 — Each client PC (×60)
+Copy the repo to the PC. Double-click install.bat (UAC) → the wizard opens.
+Fill in: Hub URL http://192.168.1.172:8000, paste the enroll key (hub dashboard → Devices → Show enroll key), click Test hub (goes green), then printer name, a unique device name (e.g. gcms-01), device type, optional PDF password → Install.
+Mass rollout (no wizard): the scripted setup.ps1 -Action install … one-liner in LAN-SETUP.md.
+Rotate the super-admin password: run set-super-admin.bat (the factory default is distributed out-of-band; it is not stored in the repo).
+Phase 4 — Verify the whole chain
+Tester creates a registration (+tests) — in the LIMS web app (cloud) or the hub's Catalog tab (local). It reaches every client's dropdown within ~2 s.
+On a client: print anything → pick Registration → Test → Attach & print.
+Confirm: file appears at \\192.168.1.172\limsDocs\<device>\<type>\<reg>\<test>\<reg>_<test>_<id>.pdf; the hub Documents tab shows it filed (→ forwarded in cloud mode); it appears in the LIMS Documents page.
+Print again and let the dialog time out (Cancel now DISCARDS the job) → it lands in Held → assign a reg+test → it files.
+Phase 5 — Ongoing operations & security
+Back up C:\LIMSHub\data\ (DB + tokens) and C:\limsDocs\ on your schedule.
+Rotate C:\LIMSHub\data\service.log periodically (it grows).
+Monitor http://192.168.1.172:8000/healthz, or install-hub-service.ps1 -Action status. Watch the Documents tab for forward_failed (it retries automatically).
+HTTPS for confidential data: reverse proxy (Caddy/nginx/IIS) → 127.0.0.1:8000, point clients at https://…. See PRODUCTION.md §5.
+Secrets: service key stays DPAPI-encrypted on the hub; per-printer passwords DPAPI; dashboard session auto-expires after 20 min idle.
+The golden rules
+Once the service is installed, never run run.bat — the service owns port 8000; a manual run collides (Errno 10048). Manage only via install-hub-service.ps1 -Action status | uninstall.
+One hub instance only. If you ever see 10048, a second copy (or a leftover) is running — reboot or stop it.
+Tokens are hidden in service mode — always read the current one from C:\LIMSHub\data\admin_token.txt / Show enroll key, not the console.
+Each client's device name must be unique (409 on duplicate).

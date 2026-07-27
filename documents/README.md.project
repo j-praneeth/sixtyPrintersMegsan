@@ -1,0 +1,338 @@
+# Virtual Cloud Printer (Windows)
+
+Create one or more **virtual printers** on Windows. Anything you print to them —
+from any app (Word, Chrome, PDF viewers, your ERP, …) — is converted to a **PDF**
+and **POSTed** together with the document name.
+
+It runs in one of two modes:
+
+- **LAN → LIMS pipeline (primary).** Offline client PCs print to a central **hub**
+  on the LAN (`hub\`), which files every PDF into the shared
+  `limsDocs\<device>\<device type>\<registration>\<test>\` tree and instantly
+  forwards it to a cloud **LIMS** (Supabase + React, `lims\`). At print time the
+  user picks the **registration number** and **test** from dropdowns synced from
+  the LIMS — nothing typed by hand, and a job without a valid registration is
+  **held** at the hub (never lost) until one is assigned.
+  **📗 Deployment runbook: [LAN-SETUP.md](LAN-SETUP.md).**
+- **Legacy direct-URL mode.** Each printer POSTs straight to its own HTTPS URL —
+  exactly as before. Pass `-Url` (or answer the URL prompt) and nothing else changes.
+
+```
+Any app ─Print▶ "GCMS Printer" ─▶ pick Registration ▶ pick Test ─▶ PDF
+      ─▶ hub (192.168.1.172:8000) ─▶ limsDocs\gcms-01\gcms\R-2026-0001\rx-test\…
+                                   ─▶ cloud LIMS (appears live)
+```
+
+---
+
+## Quick start
+
+1. **Double-click `install.bat`** and approve the Administrator prompt (UAC).
+2. A **click-through wizard** opens (Next → Next → Install; you can paste into
+   every box): pick *LIMS hub printer* and fill the hub URL, unique **device
+   name**, **enroll key** (from the hub console), **device type** and optional
+   per-printer **PDF password** — see [LAN-SETUP.md](LAN-SETUP.md) — or pick
+   *Legacy printer* and just give a URL.
+3. Click **Install** and watch the progress in the window (first run downloads a
+   few tools — see below).
+4. Done. Open any app → Print → pick your printer. The job is uploaded as a PDF.
+
+<sub>Prefer a console / scripting? `setup.ps1 -Action install` still has the
+original prompt-based and fully-parameterized flows.</sub>
+
+To add another printer later: **double-click `add-printer.bat`**.
+To check things are working: **double-click `status.bat`**.
+To remove everything: **double-click `uninstall.bat`**.
+
+---
+
+## Full setup on a desktop, from `git clone` to a working printer
+
+> 📘 **For the complete, step-by-step walkthrough (prerequisites → clone →
+> simulator → install → registration numbers → verify → troubleshoot → reset),
+> see [SETUP.md](SETUP.md).** The condensed version follows.
+
+On the target **Windows** machine:
+
+1. **Install Git** (if needed) — <https://git-scm.com/download/win> — then clone:
+   ```bat
+   git clone https://github.com/arupa444/virtualPrinterMegsan.git
+   cd virtualPrinterMegsan
+   ```
+   (Or download the repo ZIP from GitHub and extract it.)
+
+2. *(Optional but recommended for a first run)* **Start the local simulator** so
+   you can watch jobs arrive, in a separate terminal:
+   ```bat
+   cd simulator
+   run.bat
+   ```
+   It prints an **admin token** and serves `http://localhost:8000/`. Open that
+   page, paste the token, create a link, and copy its ingest URL
+   (`http://localhost:8000/ingest/<token>`). See [simulator/README.md](simulator/README.md).
+
+3. **Install the printer.** Back in the repo root, **double-click `install.bat`**
+   (approve the UAC prompt). When prompted, enter:
+   - a **printer name** (e.g. `Invoices`)
+   - the **URL** — paste the simulator link from step 2, or your real HTTPS endpoint.
+
+4. **Print.** Open any app → Print → choose your printer. The job is converted to
+   PDF and POSTed. If you used the simulator, refresh its dashboard to see the PDF
+   and document name; otherwise check your endpoint. `status.bat` and
+   `%ProgramData%\VirtualCloudPrinter\log.txt` confirm what happened.
+
+5. **Add more printers** anytime with `add-printer.bat`; **remove everything**
+   with `uninstall.bat`.
+
+> For confidential/production data, read
+> [COMPLIANCE-AND-PRIVACY.md](COMPLIANCE-AND-PRIVACY.md) first — especially the
+> Ghostscript licensing note and the HTTPS/`verify_tls` requirement.
+
+## What gets installed (automatically, on first run)
+
+The installer is self-contained; it fetches what it needs the first time:
+
+| Component | Why | How it's obtained |
+|---|---|---|
+| **uv** + a private **Python 3.12** | runs the uploader | `winget` or the official uv installer; Python is placed under `%ProgramData%\VirtualCloudPrinter\python` |
+| **Ghostscript** | converts PostScript → PDF | `winget` (`ArtifexSoftware.GhostScript`), or the official installer from GitHub |
+| **mfilemon** print-port monitor | captures the print job and runs our uploader | silent install of `mfilemon-setup.exe` from the author's **GitHub releases** (or an offline copy in `vendor\`) |
+| **qpdf** | AES-256 PDF encryption (only if you enable it) | GitHub release zip → `%ProgramData%\VirtualCloudPrinter\qpdf`, or `winget` / `vendor\qpdf-*.zip` |
+| **MS Publisher (v3 PostScript) driver** | inbox driver that emits PostScript | already in Windows (`prnge001.inf`) |
+
+Everything the tool itself creates lives in **`%ProgramData%\VirtualCloudPrinter\`**:
+`upload.py`, `prompt-id.ps1`, `config.json`, the `venv`, `python`, `spool\`,
+`failed\`, `ids\`, and `log.txt`.
+
+> **Why a v3 driver?** A v4 *class* driver (e.g. "Microsoft PS Class Driver")
+> cannot be attached to a port owned by a third-party port monitor (mfilemon) —
+> Windows rejects it. The installer uses an inbox **v3 pscript5** driver, which
+> binds cleanly and still emits PostScript.
+
+> **Requirements:** Windows 10/11 (64-bit), Administrator rights for install, and
+> internet access on first run to fetch the tools above.
+
+---
+
+## Test it locally first (recommended)
+
+Before pointing at a real server, verify the whole pipeline on your own machine:
+
+```bat
+python test_server.py
+```
+
+It prints a URL like `http://localhost:8000/upload`. Set a printer to that URL
+(either during install, or edit `config.json` — see below), then print anything.
+The received PDF and the document name show up in the console and in `.\received\`.
+
+---
+
+## Attaching a registration number / UUID to a print job
+
+The identifier is sent to your URL as its own form field, **`registration_number`**
+(rename via `registration_field` in `config.json`), alongside `docname` + `file`.
+There are three ways to supply it — no admin needed for any:
+
+- **Automatic per-print prompt (default).** Each time you print, a dialog pops up
+  on your screen. On a **hub printer** it shows two dropdowns — the open
+  **registrations** for this printer's device type (searchable) and that
+  registration's **tests** — fed live from the hub's catalog (with a
+  `limsDocs\.vcp\catalog` share fallback); **Skip** sends the job anyway and the
+  hub **holds** it until a registration is assigned in its dashboard. On a legacy
+  printer it is the original free-text box (type a value or **New UUID**). Turn
+  the prompt off with `"prompt_registration": false` in `config.json`.
+- **Set Print ID (single, before printing).** Double-click **`set-id.bat`** (or the
+  **"Set Print ID"** desktop shortcut), enter a number, **Save**, then print. Serves
+  as the fallback when the prompt is skipped/disabled.
+- **Print & Register (batch).** Double-click **`print-register.bat`**, pick multiple
+  files, give each its own number (or a prefix + auto-increment), **Print all** —
+  each PDF is printed in turn with its own number.
+
+> How it works: `upload.py` runs as SYSTEM, so for the live prompt it launches
+> `prompt-id.ps1` **into your interactive session** (`WTSQueryUserToken` +
+> `CreateProcessAsUser`). Every mechanism writes a small file under the (locked)
+> install folder's user-writable `ids\` subfolder; the uploader reads it, attaches
+> the value, and consumes it. It's fully best-effort — if the prompt can't show,
+> the print still uploads.
+
+## Encrypting the PDFs (optional, AES-256)
+
+Off by default. When enabled, every PDF is encrypted with **AES-256** — the
+strongest standard document encryption — with **no quality loss** (it's encrypted,
+not recompressed). It's done by **qpdf** (installed alongside the other tools);
+Ghostscript isn't used for this because its encryption is weak (RC4 only).
+
+**Per printer (recommended):** the password is set right when the printer is
+added (hub mode install prompt). Manage it later with:
+- **`change-password.bat`** — change or disable ONE printer's password (asks for
+  the **super-admin password** first; stored **DPAPI-encrypted**, never plaintext).
+- **`view-password.bat`** — forgot a printer's password? It is shown on screen
+  after super-admin verification. The factory super-admin password is NOT stored
+  anywhere in this repo (only its PBKDF2-SHA256 hash is embedded); it is
+  distributed to deployment admins out-of-band — **rotate it immediately** with
+  **`set-super-admin.bat`**.
+
+**Global fallback:** double-click **`set-password.bat`** (elevates), type a
+passphrase (blank = off). It enables encryption for all printers without their
+own password, stores the passphrase, and ensures qpdf is installed — no config
+editing, no spooler restart.
+
+<sub>Advanced alternatives: a **machine** env var `setx VCP_PDF_PASSWORD "…" /M`
+(the `/M` is required — SYSTEM only sees *machine* vars — then `fix-queue.bat` to
+restart the spooler), or `config.json` → `pdf_encryption`.</sub>
+
+Received PDFs then need the passphrase to open. **Decode** with **`decode-pdf.bat`**
+(pick/drag files, enter the password → `<name>-decrypted.pdf`) or any PDF reader.
+To confirm it worked: a PDF printed *after* enabling should prompt for a password
+when opened, and `log.txt` shows `Encrypted PDF with AES-256`.
+
+> Fail-safe: if enabled but the passphrase or qpdf is missing, the job is kept in
+> `failed\` rather than sent unencrypted. Strength depends on the passphrase — use a
+> long random one and store it in a secrets manager.
+
+## Configuration — `config.json`
+
+Located at `%ProgramData%\VirtualCloudPrinter\config.json`. The installer manages
+it for you, but you can edit it directly (no reinstall needed — changes apply to
+the next print job).
+
+```jsonc
+{
+  "printers": {
+    "Invoices": {                       // MUST match the Windows printer name
+      "url": "https://api.example.com/invoices",
+      "docname_field": "docname",       // form field name for the document name
+      "file_field": "file",             // form field name for the PDF
+      "extra_fields": { "source": "erp" },  // any extra form fields to send
+      "headers": { "Authorization": "Bearer XYZ" },  // any extra HTTP headers
+      "verify_tls": true                // set false only for self-signed test certs
+    }
+  },
+
+  "default_url": "",                    // used if a printer isn't listed above
+  "timeout_seconds": 60,
+  "retry_count": 2,                     // retries on upload failure
+  "retry_delay_seconds": 3,
+  "ghostscript_path": "C:\\Program Files\\gs\\gs10.03.1\\bin\\gswin64c.exe"
+}
+```
+
+### What the server receives
+An HTTP **POST** with `Content-Type: multipart/form-data` containing:
+- **`docname`** — the document name Windows assigned to the job (e.g. `Invoice 42`).
+- **`file`** — the PDF, sent with filename `<docname>.pdf` and type `application/pdf`.
+
+(The field names are configurable per printer via `docname_field` / `file_field`.)
+
+---
+
+## How it works (under the hood)
+
+1. The printer uses an inbox **v3 PostScript driver** (`MS Publisher Color Printer`),
+   so every job becomes **PostScript**.
+2. A redirection **port** (registered under the **mfilemon / clawmon** port monitor)
+   receives that PostScript, writes it to `spool\`, and launches **`upload.py`**,
+   passing the spool file, job id, **printer name** (`%r`), user (`%u`) and
+   **document name** (`%t`).
+3. `upload.py` (running as SYSTEM) optionally prompts for a registration number,
+   runs **Ghostscript** to turn the PostScript into a PDF, looks up the printer's
+   URL in `config.json`, and **POSTs** the PDF.
+4. On success the temp files are deleted; on failure the PDF is kept in `failed\`
+   and the error is written to `log.txt` so nothing is ever lost.
+
+> The spooler runs the port's I/O and launches `upload.py` **while impersonating
+> the print-submitting user**, so `install.bat` grants that user the minimal
+> access it needs (create the `.ps` in `spool\`, read+execute the interpreter and
+> `prompt-id.ps1`) — while keeping `config.json`/`upload.py` locked to
+> SYSTEM+Admins. See the security notes below.
+
+---
+
+## Using clawmon instead of mfilemon (optional)
+
+You chose *clawmon* — but clawSoft publishes **no prebuilt clawmon binaries**, so a
+one-click installer would have to compile C++ from source. Its parent **mfilemon**
+is byte-for-byte compatible (same registry format, same `%t`/`%r`/`%f` macros) and
+ships a ready installer, so the installer uses mfilemon by default.
+
+If you specifically want clawmon, build it (Visual Studio) or obtain
+`clawmon.dll`, `clawmonui.dll`, and `regmon.exe`, drop them into the **`vendor\`**
+folder next to `install.bat`, and re-run `install.bat`. The installer detects them
+and registers clawmon automatically. Source: <https://github.com/hessandrew/clawmon>.
+
+---
+
+## Troubleshooting
+
+- **First thing to try: `fix-queue.bat`** (self-elevating). It clears a stuck print
+  queue, re-applies the ACLs the print pipeline needs, refreshes the SYSTEM-side
+  scripts, and writes a full diagnostic report to **`vcp-diagnostics.txt`** in the
+  repo (interpreter check, ACLs, `config.json`, `log.txt` tail, `failed\`).
+- **Nothing arrives at my URL.** Open `status.bat` and read the tail of the log, or
+  open `%ProgramData%\VirtualCloudPrinter\log.txt`. Each job writes a block there.
+- **Jobs stuck in the queue as "Error".** Run `fix-queue.bat` — a poison job can
+  only be cleared by restarting the spooler (needs admin), which it does for you.
+- **No registration dialog.** Ensure `"prompt_registration": true`, that you're
+  logged in interactively, and check `log.txt` for a `Registration prompt: …` line.
+- **`Ghostscript not found`.** Set the full path to `gswin64c.exe` in
+  `config.json` → `ghostscript_path`.
+- **Failed uploads.** Check `%ProgramData%\VirtualCloudPrinter\failed\` — every PDF
+  that couldn't be uploaded is preserved there.
+- **Want to see errors live?** Temporarily change the port's `UserCommand` from
+  `pythonw.exe` to `python.exe`, or just run a job and watch `log.txt`.
+- **SmartScreen warning** when the mfilemon installer runs: it's an older signed
+  community tool; approve it once, or pre-install mfilemon yourself.
+
+---
+
+## Security notes
+
+- The install folder `%ProgramData%\VirtualCloudPrinter` is locked down to
+  **SYSTEM + Administrators** during install. This protects any auth tokens you put
+  in a printer's `headers` and prevents a local privilege-escalation vector (the
+  uploader runs as SYSTEM).
+- The spooler runs the port's I/O and launches `upload.py` **while impersonating
+  the print-submitting user**, so the installer grants that user the *minimal*
+  extra access it needs: create-only in `spool\` (each user owns only its own job
+  file), and **read+execute** on the interpreter and `prompt-id.ps1`. No write is
+  granted anywhere it could plant code, and `config.json` / `upload.py` / `log.txt`
+  / `failed\` stay SYSTEM+Admins-only.
+- Because of that lock-down, edit `config.json` from an **elevated** editor
+  (Run as administrator), or via `add-printer.bat`.
+- Ghostscript runs with `-dSAFER`. Jobs are only ever sent to the URL configured
+  for the printer that received them (matched case/space-insensitively); if a
+  printer isn't in `config.json` and no `default_url` is set, the job is preserved
+  in `failed\` rather than sent anywhere.
+
+## Files in this project
+
+| File | Purpose |
+|---|---|
+| `LAN-SETUP.md` | **LAN → LIMS deployment runbook (hub + Supabase) — start here** |
+| `SETUP.md` | full clone-to-running walkthrough (single machine / legacy mode) |
+| `ARCHITECTURE.md` | interface contracts between client / hub / LIMS (for developers) |
+| `install.bat` | one-click install via the GUI wizard (elevates) |
+| `add-printer.bat` | add another printer via the GUI wizard (elevates) |
+| `setup-gui.ps1` | the click-through setup wizard (launched by the two above) |
+| `set-id.bat` / `set-id.ps1` | set a registration number / UUID for your next single print |
+| `print-register.bat` / `print-register.ps1` | batch: pick files, give each its own number, print all |
+| `prompt-id.ps1` | the per-print registration/test dialog (launched by `upload.py`) |
+| `set-password.bat` | set/clear the GLOBAL AES-256 encryption passphrase (elevates) |
+| `change-password.bat` | change ONE printer's PDF password (super-admin gated, DPAPI) |
+| `view-password.bat` | show a printer's PDF password (super-admin gated) |
+| `set-super-admin.bat` | rotate the super-admin password (PBKDF2 hash only) |
+| `decode-pdf.bat` / `decode-pdf.ps1` | decrypt an AES-256 encrypted PDF (qpdf/Ghostscript) |
+| `status.bat` | show monitor, printers, device names/types, URLs, recent log |
+| `fix-queue.bat` | unjam the print queue + write full diagnostics (elevates) |
+| `uninstall.bat` | remove printers, port, files, and shortcuts |
+| `setup.ps1` | all the actual logic (called by the .bat files) |
+| `upload.py` | the per-job converter + uploader (stdlib only) |
+| `config.template.json` | starting configuration |
+| `test_server.py` | minimal local receiver for end-to-end testing |
+| `hub/` | **LIMS Print Hub** — the central LAN receiver/filer/forwarder (FastAPI) |
+| `lims/` | cloud LIMS: Supabase schema + React web app for testers |
+| `vendor/` | drop `mfilemon-setup.exe` (offline) or clawmon binaries here |
+| `simulator/` | FastAPI receiver simulator (legacy dev testing) |
+| `COMPLIANCE-AND-PRIVACY.md` | licensing, regulatory & privacy guidance (read for pharma use) |
+| `NOTICE` / `LICENSE` | third-party license obligations / this project's MIT license |

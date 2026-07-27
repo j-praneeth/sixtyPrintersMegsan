@@ -1,0 +1,61 @@
+{
+  "_comment": "Virtual Cloud Printer configuration. One entry per printer under 'printers'. The key MUST match the printer name exactly as it appears in the Windows print dialog. A printer entry WITH 'device_name'+'token' is a hub printer (3-dropdown registration/method/parameter prompt + metadata upload to the LAN hub, keyed by 'department_name'+'equipment_name'); an entry without them is a legacy printer and just POSTs docname + file to its 'url'.",
+
+  "_hub_comment": "LAN hub that enrolls devices, receives jobs and serves the registration catalog. 'catalog_share_dir' is the share-file fallback the user-session prompt reads when the hub HTTP catalog is unreachable.",
+  "hub": {
+    "base_url": "http://192.168.1.172:8000",
+    "verify_tls": true
+  },
+  "catalog_share_dir": "\\\\192.168.1.172\\limsDocs\\.vcp\\catalog",
+
+  "printers": {
+    "Virtual Cloud Printer": {
+      "url": "https://example.com/print-upload",
+      "token": "",
+      "device_name": "",
+      "department_name": "",
+      "equipment_name": "",
+      "docname_field": "docname",
+      "file_field": "file",
+      "extra_fields": {},
+      "headers": {},
+      "verify_tls": true,
+      "pdf_encryption": {
+        "enabled": false,
+        "password_dpapi": ""
+      }
+    }
+  },
+
+  "_super_admin_comment": "PBKDF2-SHA256 record {algo, iterations, salt, hash} written by setup.ps1 (seeded on install; rotate with set-super-admin.bat). NEVER store a plaintext password here.",
+  "super_admin": null,
+
+  "default_url": "",
+
+  "docname_field": "docname",
+  "file_field": "file",
+  "registration_field": "registration_number",
+  "extra_fields": {},
+  "headers": {},
+
+  "prompt_registration": true,
+  "prompt_timeout_seconds": 180,
+
+  "_prompt_batch_comment": "When one user's app prints several PDFs at once (N concurrent jobs on the same printer), show ONE registration dialog and apply its answer (or its Cancel, which discards every job in the batch) to every job that arrives while the dialog is open or within prompt_batch_grace_seconds of it being ANSWERED. Keep the grace window to a few seconds: it only exists to catch the tail of the same burst of jobs - the next document the user prints must re-prompt, never silently inherit the previous number. Set prompt_batch to false to get one dialog per document again.",
+  "prompt_batch": true,
+  "prompt_batch_grace_seconds": 1,
+
+  "_pdf_encryption_comment": "GLOBAL fallback: encrypt each PDF with AES-256 (via qpdf, lossless - no quality loss). Per-printer pdf_encryption (with 'password_dpapi', a DPAPI-protected blob managed by change-password.bat) overrides this. Resolution order in upload.py: printer password_dpapi -> printer password -> VCP_PDF_PASSWORD machine env var -> this block. If enabled with no resolvable passphrase, or qpdf is missing, jobs are preserved in failed\\ rather than sent unencrypted.",
+  "pdf_encryption": {
+    "enabled": false,
+    "password": ""
+  },
+
+  "verify_tls": true,
+  "timeout_seconds": 60,
+  "retry_count": 2,
+  "retry_delay_seconds": 3,
+
+  "ghostscript_path": "",
+  "qpdf_path": ""
+}
