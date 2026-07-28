@@ -46,6 +46,8 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse, Response
 from starlette.concurrency import run_in_threadpool
 
+import ocr  # Google Vision Sample Set ID / batch-From extraction (hub-side)
+
 # Same sizing rationale as simulator/app.py: a burst of ~60-100 concurrent
 # uploads must not queue on anyio's default threadpool limit of 40. Each op is
 # short (small INSERT or a streamed chunk copy), so the loop never blocks.
@@ -156,9 +158,17 @@ DEFAULT_CONFIG = {
     "supabase_db_password_dpapi": "",
     "supabase_db_password": "",
     # Application variables for self-hosted Supabase
-    "supabase_publishable_key": "",      # SUPABASE_PUBLISHABLE_KEY (anon/public key)
+    "supabase_publishable_key_dpapi": "", # SUPABASE_PUBLISHABLE_KEY (DPAPI at rest)
+    "supabase_publishable_key": "",       # SUPABASE_PUBLISHABLE_KEY (non-Windows dev)
     "supabase_session_secret_dpapi": "", # SESSION_SECRET_CURRENT (DPAPI at rest)
     "supabase_session_secret": "",       # SESSION_SECRET_CURRENT (non-Windows dev)
+    # Google Cloud Vision OCR (Sample Set ID + batch "From" extraction). The
+    # service-account JSON is stored DPAPI-encrypted at rest (same contract as the
+    # service key); the plain field is the non-Windows dev fallback. The
+    # GOOGLE_OCR_CREDENTIALS env var overrides both.
+    "google_ocr_enabled": False,
+    "google_ocr_credentials_dpapi": "",
+    "google_ocr_credentials": "",
 }
 
 
@@ -275,6 +285,20 @@ def get_db_password():
     return ""
 
 
+def get_publishable_key():
+    """Resolve SUPABASE_PUBLISHABLE_KEY: plain field (dev) or DPAPI blob (Windows at-rest)."""
+    val = (CONFIG.get("supabase_publishable_key") or "").strip()
+    if val:
+        return val
+    blob = (CONFIG.get("supabase_publishable_key_dpapi") or "").strip()
+    if blob:
+        try:
+            return dpapi_unprotect_b64(blob)
+        except Exception as exc:
+            log.error("DPAPI decrypt of publishable key failed: %s", exc)
+    return ""
+
+
 def get_session_secret():
     """Resolve SESSION_SECRET_CURRENT: plain field (dev) or DPAPI blob (Windows at-rest)."""
     sec = (CONFIG.get("supabase_session_secret") or "").strip()
@@ -287,6 +311,28 @@ def get_session_secret():
         except Exception as exc:
             log.error("DPAPI decrypt of session secret failed: %s", exc)
     return ""
+
+
+def get_google_ocr_credentials():
+    """Resolve the Google Vision service-account JSON: env var overrides config;
+    plain field (dev) or DPAPI blob (Windows at-rest). Empty string when unset."""
+    creds = os.environ.get("GOOGLE_OCR_CREDENTIALS", "").strip()
+    if creds:
+        return creds
+    creds = (CONFIG.get("google_ocr_credentials") or "").strip()
+    if creds:
+        return creds
+    blob = (CONFIG.get("google_ocr_credentials_dpapi") or "").strip()
+    if blob:
+        try:
+            return dpapi_unprotect_b64(blob)
+        except Exception as exc:
+            log.error("DPAPI decrypt of Google OCR credentials failed: %s", exc)
+    return ""
+
+
+def google_ocr_configured():
+    return bool(CONFIG.get("google_ocr_enabled") and get_google_ocr_credentials())
 
 
 def protect_secret(text):
@@ -418,6 +464,7 @@ def init_db():
                 test_parameter      TEXT,
                 pdf_name            TEXT,   -- stored file name
                 pdf_from            TEXT,   -- the app's print title / source doc
+                sample_set_id       TEXT,   -- instrument Sample Set ID (OCR-derived)
                 stored_path         TEXT,   -- local limsDocs path (deleted after push)
                 storage_path        TEXT,   -- Supabase Storage object key (idempotency)
                 size                INTEGER,
@@ -455,7 +502,8 @@ def init_db():
             ("department_name", "TEXT"), ("equipment_name", "TEXT"),
             ("registration_number", "TEXT"), ("test_method", "TEXT"),
             ("test_parameter", "TEXT"), ("pdf_name", "TEXT"),
-            ("pdf_from", "TEXT"), ("storage_path", "TEXT")])
+            ("pdf_from", "TEXT"), ("storage_path", "TEXT"),
+            ("sample_set_id", "TEXT")])
         if not conn.execute("SELECT 1 FROM meta WHERE key='pd_version'").fetchone():
             conn.execute("INSERT INTO meta (key, value) VALUES ('pd_version', '')")
     _run(_init)
@@ -792,6 +840,34 @@ def _read_bytes(path):
         return fh.read()
 
 
+async def _extract_sample_set(row, pdf_bytes, current_from):
+    """Run Google Vision on the PDF and derive the Sample Set ID + a clean batch
+    'From' header (see ocr.parse_batch). Persists both onto the documents row and
+    returns (sample_set_id, pdf_from) for the forward payload. Best-effort: any
+    failure leaves the Sample Set ID unset and keeps the client-supplied From.
+    The transient 'extracting' status drives the dashboard's progress indicator."""
+    doc_id = row["document_id"]
+    await run_db(lambda c: c.execute(
+        "UPDATE documents SET status = 'extracting' WHERE id = ? "
+        "AND status IN ('filed', 'forward_failed', 'extracting')", (doc_id,)))
+    sample_set_id, pdf_from = None, None
+    try:
+        text = await ocr.vision_extract_text(
+            HTTP_CLIENT, get_google_ocr_credentials(), pdf_bytes)
+        sample_set_id, pdf_from = ocr.parse_batch(text, row["equipment_name"])
+        log.info("OCR doc %s (%s): sample_set_id=%r",
+                 doc_id, row["equipment_name"], sample_set_id)
+    except Exception as exc:
+        log.warning("OCR doc %s failed (forwarding without a Sample Set ID): %s",
+                    doc_id, exc)
+    new_sid = (sample_set_id or "").strip() or None
+    new_from = (pdf_from or "").strip() or current_from
+    await run_db(lambda c: c.execute(
+        "UPDATE documents SET sample_set_id = ?, pdf_from = ?, status = 'filed' "
+        "WHERE id = ?", (new_sid, new_from, doc_id)))
+    return new_sid, new_from
+
+
 async def _forward_one(row):
     """Storage upload + documents row insert for one queue entry. Raises on
     failure (the caller schedules the backoff retry)."""
@@ -799,6 +875,14 @@ async def _forward_one(row):
     key = get_service_key()
     bucket = CONFIG.get("bucket") or "printer-documents"
     data = await run_in_threadpool(_read_bytes, row["stored_path"])
+
+    # OCR the PDF once, before it leaves for Supabase, to fill in the Sample Set
+    # ID and correct the batch 'From'. Guarded on sample_set_id being unset so a
+    # forward retry never re-bills a Vision call.
+    sample_set_id = row["sample_set_id"]
+    pdf_from = row["pdf_from"]
+    if google_ocr_configured() and not (sample_set_id or "").strip():
+        sample_set_id, pdf_from = await _extract_sample_set(row, data, pdf_from)
 
     r = await HTTP_CLIENT.post(
         "%s/storage/v1/object/%s/%s" % (url, bucket, row["storage_path"]),
@@ -811,12 +895,13 @@ async def _forward_one(row):
         raise RuntimeError("storage upload HTTP %d: %s" % (r.status_code, r.text[:300]))
 
     payload = {
-        "pdf_name": row["pdf_name"], "pdf_from": row["pdf_from"],
+        "pdf_name": row["pdf_name"], "pdf_from": pdf_from,
         "device_name": row["device_name"], "equipment_name": row["equipment_name"],
         "registration_number": row["registration_number"],
         "test_method": row["test_method"], "department_name": row["department_name"],
         "test_parameter": row["test_parameter"], "printed_by": row["printed_by"],
         "size_of_pdf": row["size"], "storage_path": row["storage_path"],
+        "sample_set_id": sample_set_id or None,
     }
     # UPSERT on storage_path (unique in printer_documents) so an at-least-once
     # retry after a post-commit failure (hub restart, or a gateway 5xx/timeout
@@ -837,8 +922,8 @@ def _next_due(conn):
         "SELECT q.document_id, q.storage_path, q.attempts,"
         "       d.registration_number, d.department_name, d.equipment_name,"
         "       d.test_method, d.test_parameter, d.pdf_name, d.pdf_from,"
-        "       d.device_name, d.stored_path, d.size, d.sha256, d.printed_by,"
-        "       d.job_id, d.status"
+        "       d.sample_set_id, d.device_name, d.stored_path, d.size, d.sha256,"
+        "       d.printed_by, d.job_id, d.status"
         "  FROM forward_queue q JOIN documents d ON d.id = q.document_id"
         " WHERE q.next_attempt <= ? ORDER BY q.next_attempt LIMIT 1",
         (time.time(),)).fetchone()
@@ -857,7 +942,7 @@ async def forward_worker_task():
                 await asyncio.sleep(1)
                 continue
             doc_id = row["document_id"]
-            if row["status"] not in ("filed", "forward_failed"):
+            if row["status"] not in ("filed", "forward_failed", "extracting"):
                 # held again / deleted meanwhile - drop the stale queue entry
                 await run_db(lambda c: c.execute(
                     "DELETE FROM forward_queue WHERE document_id = ?", (doc_id,)))
@@ -1326,8 +1411,11 @@ async def api_get_settings(x_admin_token: str = Header(default="")):
         "supabase_db_user": CONFIG.get("supabase_db_user") or "",
         "supabase_db_password_set": bool(get_db_password()),
         # Application variables
-        "supabase_publishable_key": CONFIG.get("supabase_publishable_key") or "",
+        "supabase_publishable_key_set": bool(get_publishable_key()),
         "supabase_session_secret_set": bool(get_session_secret()),
+        # Google Cloud Vision OCR
+        "google_ocr_enabled": bool(CONFIG.get("google_ocr_enabled")),
+        "google_ocr_credentials_set": bool(get_google_ocr_credentials()),
     }
 
 
@@ -1379,8 +1467,15 @@ async def api_set_settings(request: Request, x_admin_token: str = Header(default
             CONFIG["supabase_db_password"] = db_pass
             CONFIG["supabase_db_password_dpapi"] = ""
     # Application variables
-    if "supabase_publishable_key" in body:
-        CONFIG["supabase_publishable_key"] = str(body["supabase_publishable_key"] or "").strip()
+    pub_key = str(body.get("supabase_publishable_key") or "").strip()
+    # Blank or the mask placeholder = keep the stored key unchanged.
+    if pub_key and pub_key != "********":
+        if os.name == "nt":
+            CONFIG["supabase_publishable_key_dpapi"] = dpapi_protect_b64(pub_key)
+            CONFIG["supabase_publishable_key"] = ""
+        else:
+            CONFIG["supabase_publishable_key"] = pub_key
+            CONFIG["supabase_publishable_key_dpapi"] = ""
     session_secret = str(body.get("supabase_session_secret") or "").strip()
     if session_secret:
         if os.name == "nt":
@@ -1389,6 +1484,18 @@ async def api_set_settings(request: Request, x_admin_token: str = Header(default
         else:
             CONFIG["supabase_session_secret"] = session_secret
             CONFIG["supabase_session_secret_dpapi"] = ""
+    # Google Cloud Vision OCR
+    if "google_ocr_enabled" in body:
+        CONFIG["google_ocr_enabled"] = bool(body["google_ocr_enabled"])
+    google_creds = str(body.get("google_ocr_credentials") or "").strip()
+    # Blank or the mask placeholder = keep the stored credentials unchanged.
+    if google_creds and google_creds != "********":
+        if os.name == "nt":
+            CONFIG["google_ocr_credentials_dpapi"] = dpapi_protect_b64(google_creds)
+            CONFIG["google_ocr_credentials"] = ""
+        else:
+            CONFIG["google_ocr_credentials"] = google_creds
+            CONFIG["google_ocr_credentials_dpapi"] = ""
     await run_in_threadpool(save_config, CONFIG)
     await export_catalog()  # a changed lims_docs_dir gets the share files immediately
     return await api_get_settings(x_admin_token)
@@ -1460,6 +1567,24 @@ async def api_test_connection(x_admin_token: str = Header(default="")):
         return {"connected": False, "error": str(exc), "rls_warning": ""}
 
 
+@app.get("/api/settings/test-ocr")
+async def api_test_ocr(x_admin_token: str = Header(default="")):
+    """Test Google Vision reachability with the stored credentials. Surfaces the
+    real error (e.g. billing not enabled) instead of the Supabase 'Connected'."""
+    require_admin(x_admin_token)
+    if not CONFIG.get("google_ocr_enabled"):
+        return {"ok": False, "error": "OCR extraction is disabled."}
+    creds = get_google_ocr_credentials()
+    if not creds:
+        return {"ok": False, "error": "No Google OCR credentials set."}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            await ocr.vision_test(client, creds)
+        return {"ok": True, "error": ""}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:500]}
+
+
 @app.get("/api/sync-status")
 async def api_sync_status(x_admin_token: str = Header(default="")):
     """Last printer_data sync state — used by the Catalog tab to surface errors."""
@@ -1493,6 +1618,8 @@ DASHBOARD = """<!doctype html>
  nav{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
  nav button{background:#222b36;color:var(--mut)} nav button.on{background:var(--acc);color:#fff}
  .st-filed{color:var(--acc)} .st-held{color:var(--warn)} .st-forwarded{color:var(--ok)} .st-forward_failed{color:var(--err)}
+ .st-extracting{color:var(--warn)}
+ @keyframes vcp-pulse{0%,100%{opacity:1}50%{opacity:.45}} .st-extracting{animation:vcp-pulse 1s ease-in-out infinite}
  label{color:var(--mut);font-size:12px;display:block;margin:8px 0 2px}
 </style></head><body>
 <header>
@@ -1579,10 +1706,21 @@ DASHBOARD = """<!doctype html>
     <input id="s-url" type="text" size="50" placeholder="http://your-supabase-host:3000">
     <label>SUPABASE_SERVICE_ROLE_KEY_CURRENT (stored DPAPI-encrypted; blank = keep current)</label>
     <input id="s-key" type="password" size="50">
-    <label>SUPABASE_PUBLISHABLE_KEY (anon / public key)</label>
-    <input id="s-pub-key" type="text" size="50">
+    <label>SUPABASE_PUBLISHABLE_KEY (anon / public key; stored hidden, blank = keep current)</label>
+    <input id="s-pub-key" type="password" size="50">
     <label>SESSION_SECRET_CURRENT (stored DPAPI-encrypted; blank = keep current)</label>
     <input id="s-session-secret" type="password" size="50">
+
+    <hr style="margin:16px 0;border:none;border-top:1px solid var(--border,#ddd)">
+    <b>Google Cloud Vision OCR</b>
+    <p class="muted" style="margin:6px 0 10px">Reads the instrument Sample Set ID and batch "From" header out of each chromatograph PDF before it is forwarded.</p>
+    <label><input id="s-ocr-enabled" type="checkbox"> Enable OCR extraction</label>
+    <label style="margin-top:8px">Service-account JSON (stored DPAPI-encrypted; blank = keep current)</label>
+    <textarea id="s-ocr-creds" rows="4" style="width:100%;max-width:640px;font-family:monospace;font-size:0.85em" placeholder='{"type":"service_account", ...}'></textarea>
+    <div class="row" style="margin-top:10px">
+      <button onclick="checkOcr()" id="s-ocr-btn">Test OCR connection</button>
+      <span id="s-ocr-status" style="display:none;padding:6px 12px;border-radius:6px;font-size:0.9em;font-weight:500"></span>
+    </div>
 
     <div class="row" style="margin-top:14px">
       <button onclick="saveSettings()">Save settings</button>
@@ -1665,8 +1803,9 @@ DASHBOARD = """<!doctype html>
        const tr=document.createElement('tr');
        const dev = d.device_name ? esc(d.device_name)+' <span class="muted">('+esc(d.department_name||'?')+' / '+esc(d.equipment_name||'?')+')</span>' : '<span class="muted">&mdash;</span>';
        const orig = d.pdf_from ? '<div class="muted" style="font-size:11px">from: '+esc(d.pdf_from)+'</div>' : '';
+       const stlabel = d.status==='extracting' ? 'Extracting PDF…' : esc(d.status);
        tr.innerHTML='<td>'+esc(d.pdf_name||d.pdf_from)+orig+'</td><td>'+dev+'</td>'+
-         '<td>'+reg+'</td><td><span class="'+stcls(d.status)+'">'+esc(d.status)+(d.held_reason?' &middot; '+esc(d.held_reason):'')+'</span>'+err+'</td>'+
+         '<td>'+reg+'</td><td><span class="'+stcls(d.status)+'">'+stlabel+(d.held_reason?' &middot; '+esc(d.held_reason):'')+'</span>'+err+'</td>'+
          '<td class="muted">'+esc(d.printed_by)+'</td><td class="muted">'+sizeH(d.size)+'</td><td class="muted">'+fmtTime(d.received)+'</td>'+
          '<td><a href="#" onclick="dl(event,'+d.id+',\\''+esc(d.pdf_name||d.pdf_from)+'\\')">download</a></td>';
        tb.appendChild(tr);
@@ -1810,9 +1949,15 @@ DASHBOARD = """<!doctype html>
      document.getElementById('s-db-user').value=s.supabase_db_user||'';
      document.getElementById('s-db-pass').value='';
      document.getElementById('s-db-pass').placeholder=s.supabase_db_password_set?'(set - blank keeps it)':'(no password set)';
-     document.getElementById('s-pub-key').value=s.supabase_publishable_key||'';
+     document.getElementById('s-pub-key').value='';
+     document.getElementById('s-pub-key').placeholder=s.supabase_publishable_key_set?'(set - blank keeps it)':'(no key set)';
      document.getElementById('s-session-secret').value='';
      document.getElementById('s-session-secret').placeholder=s.supabase_session_secret_set?'(set - blank keeps it)':'(no secret set)';
+     document.getElementById('s-ocr-enabled').checked=!!s.google_ocr_enabled;
+     document.getElementById('s-ocr-creds').value='';
+     document.getElementById('s-ocr-creds').placeholder=s.google_ocr_credentials_set?'(credentials set - blank keeps them)':'{"type":"service_account", ...}';
+     if(s.google_ocr_enabled && s.google_ocr_credentials_set){ checkOcr(); }
+     else { const b=document.getElementById('s-ocr-status'); b.style.display='none'; }
    }catch(e){ document.getElementById('s-msg').textContent=e.message; }
  }
  async function saveSettings(){
@@ -1829,10 +1974,13 @@ DASHBOARD = """<!doctype html>
        supabase_db_password: document.getElementById('s-db-pass').value,
        supabase_publishable_key: document.getElementById('s-pub-key').value,
        supabase_session_secret: document.getElementById('s-session-secret').value,
+       google_ocr_enabled: document.getElementById('s-ocr-enabled').checked,
+       google_ocr_credentials: document.getElementById('s-ocr-creds').value,
      })});
      document.getElementById('s-msg').textContent='Saved. Testing connection…';
      loadSettings();
      await checkConnection();
+     await checkOcr();
      document.getElementById('s-msg').textContent='Saved.';
    }catch(e){ document.getElementById('s-msg').textContent='Save failed: '+e.message; }
  }
@@ -1856,6 +2004,24 @@ DASHBOARD = """<!doctype html>
      }
    }catch(e){
      box.textContent='✘ Not Connected: '+e.message;
+     box.style.background='#f8d7da'; box.style.color='#721c24';
+   }
+ }
+ async function checkOcr(){
+   const box=document.getElementById('s-ocr-status');
+   box.style.display=''; box.textContent='Testing Google Vision…';
+   box.style.background='#f0f0f0'; box.style.color='inherit';
+   try{
+     const r=await api('/api/settings/test-ocr');
+     if(r.ok){
+       box.textContent='✔ OCR connected — Google Vision ready';
+       box.style.background='#d4edda'; box.style.color='#155724';
+     } else {
+       box.textContent='✘ OCR not working: '+(r.error||'unknown error');
+       box.style.background='#f8d7da'; box.style.color='#721c24';
+     }
+   }catch(e){
+     box.textContent='✘ OCR test failed: '+e.message;
      box.style.background='#f8d7da'; box.style.color='#721c24';
    }
  }
