@@ -700,6 +700,54 @@ def storage_path_for(department, equipment, reg, method, param):
     ])
 
 
+def serial_base(title):
+    """Base name for the stored PDF = the print/document title, sanitized, without
+    its extension. Repeat prints of the same title get -01, -02, ... appended."""
+    stem = os.path.splitext(str(title or "").strip())[0]
+    base = sanitize_segment(stem)
+    return base if base and base != "_" else "document"
+
+
+def _serial_name(base, serial):
+    """base.pdf for the first copy, base-01.pdf / base-02.pdf / ... for repeats."""
+    return "%s.pdf" % base if serial <= 0 else "%s-%02d.pdf" % (base, serial)
+
+
+def storage_key(department, equipment, reg, method, param, fname):
+    """Supabase Storage object key for a given file name (folder mirrors the tree)."""
+    return "/".join([
+        sanitize_segment(department), sanitize_segment(equipment),
+        sanitize_segment(reg), sanitize_segment(method), sanitize_segment(param),
+        fname,
+    ])
+
+
+def filed_local_path(department, equipment, reg, method, param, fname):
+    """Local path for a filed PDF with a given file name: the limsDocs tree when a
+    directory is configured, else flat in OUTBOX_DIR (no tree)."""
+    root = lims_docs_dir()
+    if not root:
+        return os.path.join(OUTBOX_DIR, fname)
+    return os.path.join(root,
+                        sanitize_segment(department), sanitize_segment(equipment),
+                        sanitize_segment(reg), sanitize_segment(method),
+                        sanitize_segment(param), fname)
+
+
+def next_free_name(conn, department, equipment, reg, method, param, base):
+    """Next unused serial file name within a folder: base.pdf, base-01.pdf, ...
+    (checks existing storage_path). Returns (fname, storage_path, local_dest).
+    The UNIQUE index on storage_path is the concurrency backstop; the caller
+    retries this on an IntegrityError so a race can never collide."""
+    serial = 0
+    while True:
+        fname = _serial_name(base, serial)
+        sp = storage_key(department, equipment, reg, method, param, fname)
+        if not conn.execute("SELECT 1 FROM documents WHERE storage_path = ?", (sp,)).fetchone():
+            return fname, sp, filed_local_path(department, equipment, reg, method, param, fname)
+        serial += 1
+
+
 def _move_file(src, dest):
     """Blocking move (may cross volumes: data dir vs limsDocs) - threadpool."""
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -1098,26 +1146,11 @@ async def ingest(token: str, request: Request):
         c, department_name, equipment_name, reg_no, test_method, test_parameter))
     received = now_iso()
 
-    if reason is None:
-        dest = filed_dest_path(department_name, equipment_name,
-                               reg_no, test_method, test_parameter)
-        storage_path = storage_path_for(department_name, equipment_name,
-                                         reg_no, test_method, test_parameter)
-        status = "filed"
-    else:
-        # Held files live under data/held/, NOT in limsDocs.
-        dest = os.path.join(HELD_DIR, uuid.uuid4().hex + "_" + pdf_filename(pdf_from))
-        storage_path = None
-        status = "held"
-    try:
-        await run_in_threadpool(_move_file, tmp_path, dest)
-    except Exception:
-        await run_in_threadpool(lambda: os.path.exists(tmp_path) and os.remove(tmp_path))
-        raise
+    # Serial base name = the print/document title (repeat prints of the same title
+    # become base.pdf, base-01.pdf, base-02.pdf, ...).
+    base = serial_base(pdf_from)
 
-    pdf_name = os.path.basename(dest)
-
-    def _insert(conn):
+    def _insert_row(conn, pdf_name, dest, storage_path, status, held_reason):
         cur = conn.execute(
             "INSERT INTO documents (device_id, device_name, department_name, equipment_name,"
             " registration_number, test_method, test_parameter, pdf_name, pdf_from,"
@@ -1127,13 +1160,42 @@ async def ingest(token: str, request: Request):
             (dev["id"], device_name, department_name, equipment_name,
              reg_no, test_method, test_parameter, pdf_name, pdf_from,
              dest, storage_path, size, sha256, printed_by,
-             fields.get("job_id") or "", status, reason, received))
-        doc_id = cur.lastrowid
-        if status == "filed":
-            _enqueue_forward(conn, doc_id, storage_path)
-        return doc_id
+             fields.get("job_id") or "", status, held_reason, received))
+        return cur.lastrowid
 
-    doc_id = await run_db(_insert)
+    def _file_and_insert(conn):
+        if reason is None:
+            # Filed: assign a clean running serial scoped to this folder. The
+            # unique index on storage_path makes a concurrent-duplicate race safe -
+            # on a collision we simply take the next serial and retry the insert.
+            while True:
+                fname, storage_path, dest = next_free_name(
+                    conn, department_name, equipment_name, reg_no, test_method, test_parameter, base)
+                try:
+                    doc_id = _insert_row(conn, fname, dest, storage_path, "filed", None)
+                except sqlite3.IntegrityError:
+                    continue
+                _enqueue_forward(conn, doc_id, storage_path)
+                return doc_id, dest, storage_path, "filed"
+        # Held files live under data/held/, NOT in limsDocs (uuid-prefixed name).
+        fname = uuid.uuid4().hex + "_" + pdf_filename(pdf_from)
+        dest = os.path.join(HELD_DIR, fname)
+        doc_id = _insert_row(conn, os.path.basename(dest), dest, None, "held", reason)
+        return doc_id, dest, None, "held"
+
+    doc_id, dest, storage_path, status = await run_db(_file_and_insert)
+
+    try:
+        await run_in_threadpool(_move_file, tmp_path, dest)
+    except Exception:
+        # The row is already inserted; a failed move would leave it pointing at a
+        # missing file (and a stuck forward). Roll the row + queue entry back.
+        await run_db(lambda c: (
+            c.execute("DELETE FROM forward_queue WHERE document_id = ?", (doc_id,)),
+            c.execute("DELETE FROM documents WHERE id = ?", (doc_id,))))
+        await run_in_threadpool(lambda: os.path.exists(tmp_path) and os.remove(tmp_path))
+        raise
+
     if reason:
         log.info("ingest %s: HELD doc %s (%s) reason=%s", token[:8], doc_id, pdf_from, reason)
     # Always 2xx (held included): the client must treat held as success.
@@ -1391,16 +1453,16 @@ async def api_assign(doc_id: int, request: Request, x_admin_token: str = Header(
     if reason:
         raise HTTPException(status_code=400, detail="Invalid assignment: " + reason)
 
-    dest = filed_dest_path(doc["department_name"], doc["equipment_name"], reg_no, method, param)
-    storage_path = storage_path_for(doc["department_name"], doc["equipment_name"],
-                                     reg_no, method, param)
+    base = serial_base(doc["pdf_from"])
+    fname, storage_path, dest = await run_db(lambda c: next_free_name(
+        c, doc["department_name"], doc["equipment_name"], reg_no, method, param, base))
     await run_in_threadpool(_move_file, doc["stored_path"], dest)
 
     def _update(conn):
         conn.execute("UPDATE documents SET registration_number = ?, test_method = ?,"
                      " test_parameter = ?, pdf_name = ?, stored_path = ?, storage_path = ?,"
                      " status = 'filed', held_reason = NULL WHERE id = ?",
-                     (reg_no, method, param, os.path.basename(dest), dest, storage_path, doc_id))
+                     (reg_no, method, param, fname, dest, storage_path, doc_id))
         _enqueue_forward(conn, doc_id, storage_path)
 
     await run_db(_update)
