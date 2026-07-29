@@ -849,6 +849,53 @@ def convert_ps_to_pdf(gs_exe, ps_file, pdf_file):
         )
 
 
+def _ps_escape(text):
+    """Escape a string for a PostScript literal ( ... )."""
+    return (text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                .replace("\r", " ").replace("\n", " "))
+
+
+def stamp_printed_by(gs_exe, pdf_file, user_name):
+    """Stamp a "Printed By" e-signature footer onto EVERY page of pdf_file, in
+    place, using Ghostscript. Installs an /EndPage handler that draws the text at
+    the bottom-left of each page (reason 0 = showpage), so it needs no PDF library
+    (stdlib-only rule holds). Raises on failure; the caller keeps it best-effort so
+    a print is never lost over a footer."""
+    # Professional footer: a thin rule across the page, "Printed by" on the left
+    # and the e-signature timestamp on the right, in subtle grey. Page width is
+    # read at render time so the right edge aligns on any page size.
+    left = _ps_escape("Printed by: " + (user_name or "unknown"))
+    right = _ps_escape("Electronically signed: " + time.strftime("%d %b %Y, %H:%M:%S"))
+    endpage = (
+        "<< /EndPage { exch pop dup 0 eq { gsave "
+        "currentpagedevice /PageSize get aload pop /pgH exch def /pgW exch def "
+        "0.72 setgray 0.5 setlinewidth 40 31 moveto pgW 40 sub 31 lineto stroke "
+        "0.28 setgray /Helvetica findfont 8 scalefont setfont "
+        "40 19 moveto (%s) show "
+        "(%s) dup stringwidth pop pgW 40 sub exch sub 19 moveto show "
+        "grestore } if 2 ne } bind >> setpagedevice" % (left, right)
+    )
+    out_file = pdf_file + ".stamped"
+    cmd = [
+        gs_exe, "-dBATCH", "-dNOPAUSE", "-dSAFER", "-dQUIET",
+        "-sDEVICE=pdfwrite", "-sOutputFile=" + out_file,
+        "-c", endpage, "-f", pdf_file,
+    ]
+    creationflags = 0x08000000 if os.name == "nt" else 0
+    result = subprocess.run(cmd, capture_output=True, creationflags=creationflags)
+    if result.returncode != 0 or not os.path.isfile(out_file) or os.path.getsize(out_file) == 0:
+        try:
+            if os.path.isfile(out_file):
+                os.remove(out_file)
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Ghostscript stamp failed (rc=%s): %s"
+            % (result.returncode, result.stderr.decode("utf-8", "replace")[:300])
+        )
+    os.replace(out_file, pdf_file)
+
+
 def find_qpdf(config):
     """Locate the qpdf executable (for AES-256 PDF encryption). Order: config
     'qpdf_path', PATH, then the private copy under %ProgramData%\\...\\qpdf\\."""
@@ -1060,6 +1107,16 @@ def main():
         pdf_file = os.path.splitext(ps_file)[0] + ".pdf"
         convert_ps_to_pdf(gs_exe, ps_file, pdf_file)
         log("Converted to PDF: %s (%d bytes)" % (pdf_file, os.path.getsize(pdf_file)))
+        # Stamp a "Printed By" e-signature footer on every page (before any
+        # encryption so it is part of the document). Best-effort: a stamp failure
+        # must not lose the print, so it logs a warning and continues unstamped.
+        if config.get("footer_signature", True):
+            try:
+                stamp_printed_by(gs_exe, pdf_file, user_name)
+                log("Stamped 'Printed By' e-sign footer for user %r (%d bytes)."
+                    % (user_name, os.path.getsize(pdf_file)))
+            except Exception as exc:
+                log("WARNING: 'Printed By' footer stamp failed (continuing unstamped): %s" % exc)
         if pdf_password:
             # AES-256 encrypt in place (lossless) before it is read/uploaded.
             encrypt_pdf(config, pdf_file, pdf_password)
