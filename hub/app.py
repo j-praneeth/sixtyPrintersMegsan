@@ -71,6 +71,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("HUB_DATA_DIR", "").strip() or os.path.join(BASE_DIR, "data")
 HELD_DIR = os.path.join(DATA_DIR, "held")
 TMP_DIR = os.path.join(DATA_DIR, "tmp")
+# Internal staging for filed PDFs when no limsDocs directory is configured: the
+# file lives here only until it is forwarded to Supabase, then it is deleted. No
+# department/equipment/... folder tree is created anywhere on disk.
+OUTBOX_DIR = os.path.join(DATA_DIR, "outbox")
 DB_PATH = os.path.join(DATA_DIR, "hub.db")
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 ADMIN_TOKEN_FILE = os.path.join(DATA_DIR, "admin_token.txt")
@@ -96,6 +100,7 @@ def ensure_dir(p):
 
 ensure_dir(HELD_DIR)
 ensure_dir(TMP_DIR)
+ensure_dir(OUTBOX_DIR)
 
 
 def now_iso():
@@ -142,7 +147,7 @@ def _quiet_mode():
 # Config (hub/data/config.json)
 # --------------------------------------------------------------------------- #
 DEFAULT_CONFIG = {
-    "lims_docs_dir": "C:\\limsDocs",
+    "lims_docs_dir": "",
     "supabase_url": "",
     # Service key at rest: DPAPI (machine scope) on Windows; the plain field is
     # the non-Windows dev fallback. SUPABASE_SERVICE_KEY env var overrides both.
@@ -198,7 +203,11 @@ if not os.path.isfile(CONFIG_PATH):
 
 
 def lims_docs_dir():
-    return os.environ.get("HUB_LIMSDOCS_DIR", "").strip() or CONFIG.get("lims_docs_dir") or "C:\\limsDocs"
+    """The local limsDocs share root, or "" when not configured. When empty, no
+    local folder tree is created — filed PDFs stage in OUTBOX_DIR until forwarded
+    to Supabase, and the catalog share export is skipped."""
+    return (os.environ.get("HUB_LIMSDOCS_DIR", "").strip()
+            or (CONFIG.get("lims_docs_dir") or "").strip())
 
 
 def poll_seconds():
@@ -594,8 +603,12 @@ def catalog_payload(snapshot, department_name, equipment_name):
 
 def _write_catalog_files(snapshot):
     """Atomic share export (section 6b): write .tmp then os.replace. Blocking -
-    run via threadpool. Best-effort: the share dir may be missing/readonly."""
-    outdir = os.path.join(lims_docs_dir(), ".vcp", "catalog")
+    run via threadpool. Best-effort: the share dir may be missing/readonly. When no
+    limsDocs directory is configured there is no share to export to, so skip."""
+    root = lims_docs_dir()
+    if not root:
+        return
+    outdir = os.path.join(root, ".vcp", "catalog")
     os.makedirs(outdir, exist_ok=True)
 
     def write_json(name, payload):
@@ -660,10 +673,18 @@ def composed_name(reg, method, param, uid):
 
 
 def filed_dest_path(department, equipment, reg, method, param):
-    """limsDocs tree: department/equipment/registration/test_method/test_parameter/
-    <reg>_<method>_<param>_<uuid8>.pdf. Every segment sanitized."""
+    """Where a filed PDF is written locally. When a limsDocs directory is
+    configured, mirror the tree:
+      <root>/department/equipment/registration/test_method/test_parameter/<name>.pdf
+    When it is NOT configured, stage the file FLAT in OUTBOX_DIR — no folder tree is
+    created — and it is deleted after the Supabase forward. The Supabase object key
+    (storage_path_for) is independent of this, so the web-app breadcrumb is
+    unaffected either way."""
     fname = composed_name(reg, method, param, secrets.token_hex(4))
-    return os.path.join(lims_docs_dir(),
+    root = lims_docs_dir()
+    if not root:
+        return os.path.join(OUTBOX_DIR, fname)
+    return os.path.join(root,
                         sanitize_segment(department), sanitize_segment(equipment),
                         sanitize_segment(reg), sanitize_segment(method),
                         sanitize_segment(param), fname)
@@ -1427,7 +1448,9 @@ async def api_set_settings(request: Request, x_admin_token: str = Header(default
     except Exception:
         raise HTTPException(status_code=400, detail="JSON body required.")
     if "lims_docs_dir" in body:
-        CONFIG["lims_docs_dir"] = str(body["lims_docs_dir"] or "").strip() or "C:\\limsDocs"
+        # Empty is allowed and meaningful: no local folder tree is created and PDFs
+        # are staged internally, then forwarded to Supabase. Do NOT re-default it.
+        CONFIG["lims_docs_dir"] = str(body["lims_docs_dir"] or "").strip()
     if "supabase_url" in body:
         CONFIG["supabase_url"] = str(body["supabase_url"] or "").strip()
     if "poll_seconds" in body:
@@ -1685,8 +1708,8 @@ DASHBOARD = """<!doctype html>
 <section id="sec-settings" style="display:none">
   <div class="card">
     <b>Settings</b>
-    <label>limsDocs directory (local path of the shared folder)</label>
-    <input id="s-dir" type="text" size="50">
+    <label>limsDocs directory (local shared folder; leave blank to store in Supabase only &mdash; no local folder is created)</label>
+    <input id="s-dir" type="text" size="50" placeholder="(not set &mdash; documents go to Supabase only)">
     <label>Catalog poll seconds</label>
     <input id="s-poll" type="number" min="1" style="width:90px">
 
@@ -1938,7 +1961,7 @@ DASHBOARD = """<!doctype html>
  async function loadSettings(){
    try{
      const s = await api('/api/settings');
-     document.getElementById('s-dir').value=s.lims_docs_dir;
+     document.getElementById('s-dir').value=s.lims_docs_dir||'';
      document.getElementById('s-url').value=s.supabase_url;
      document.getElementById('s-key').value='';
      document.getElementById('s-key').placeholder=s.supabase_service_key?'(key set - blank keeps it)':'(no key set)';
@@ -2071,7 +2094,7 @@ if __name__ == "__main__":
     lines = ["=" * 70, " LIMS Print Hub",
              " Dashboard  : http://localhost:%d/  (LAN: http://<this-ip>:%d/)" % (port, port),
              " Data dir   : %s" % DATA_DIR,
-             " limsDocs   : %s" % lims_docs_dir(),
+             " limsDocs   : %s" % (lims_docs_dir() or "(not set - Supabase only, no local tree)"),
              " Supabase   : %s" % ("configured" if supabase_configured() else "not configured (local mode)")]
     if quiet:
         # Production / service mode: keep secrets out of the console + service log.
