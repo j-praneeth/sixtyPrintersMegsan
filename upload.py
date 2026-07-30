@@ -865,7 +865,7 @@ def stamp_printed_by(gs_exe, pdf_file, user_name):
     # and the e-signature timestamp on the right, in subtle grey. Page width is
     # read at render time so the right edge aligns on any page size.
     left = _ps_escape("Printed by: " + (user_name or "unknown"))
-    right = _ps_escape("Electronically signed: " + time.strftime("%d %b %Y, %H:%M:%S"))
+    right = _ps_escape("Time Stamp: " + time.strftime("%d %b %Y, %H:%M:%S"))
     endpage = (
         "<< /EndPage { exch pop dup 0 eq { gsave "
         "currentpagedevice /PageSize get aload pop /pgH exch def /pgW exch def "

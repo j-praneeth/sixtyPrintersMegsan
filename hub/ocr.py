@@ -195,3 +195,90 @@ def parse_batch(text, equipment_name):
     except Exception as exc:  # parsing must never break the forward
         log.warning("parse_batch failed: %s", exc)
         return None, None
+
+
+# --------------------------------------------------------------------------- #
+# Extra extractors (DSC / XRD / Particle Size Analyzer / Calibration)
+# The hub only EXTRACTS these values; the web app decides the flow & placement.
+# --------------------------------------------------------------------------- #
+def _reg_no(text):
+    """The 'Reg.No' / 'Reg No' value (DSC, Particle Size Analyzer). Same-line first,
+    then a bare label with the value on the next line (columnar OCR)."""
+    m = re.search(r"Reg\.?\s*No\.?\s*[:\-]\s*([^\r\n]+)", text, re.I)
+    if m and m.group(1).strip():
+        return _normalize(m.group(1))
+    lines = [l.strip() for l in text.splitlines()]
+    for i, l in enumerate(lines):
+        if re.match(r"Reg\.?\s*No\.?\s*[:\-]?\s*$", l, re.I):
+            for j in range(i + 1, min(i + 4, len(lines))):
+                if lines[j]:
+                    return _normalize(lines[j])
+    return None
+
+
+def _xrd_title(text):
+    """The prominent XRD sample title line, e.g.
+    '00649_26_ML_Empagliflozin Film Coated Tablets 25 mg _MP-1' — a line beginning
+    with <digits>_<digits>_ML_. Returned verbatim (only inner whitespace tidied)."""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if re.match(r"^\d{3,}[_ ]\d{2}[_ ]ML[_ ]", line, re.I):
+            return re.sub(r"\s{2,}", " ", line)
+    return None
+
+
+def _calibration(text):
+    """(project_name, batch_file) when the print is a Shimadzu BATCH calibration,
+    else (None, None). The project header is a year-prefixed token ending in
+    'Calibration' (e.g. '*2025_GCMSHS$JUL$Calibration'). OCR frequently reads '$'
+    as 'S', so we do NOT require a literal '$'. Being year-anchored keeps it from
+    matching the ordinary 'Calibration Method: External Calibration' line that
+    normal ICPMS reports carry. project is truncated at 'Calibration'."""
+    m = re.search(r"(\*?\s*\d{4}[A-Za-z0-9 _$.\-]*?Calibration)\b", text, re.I)
+    if not m:
+        return None, None
+    project = re.sub(r"\s+", "_", m.group(1).strip())
+    bm = re.search(r"([A-Za-z0-9][A-Za-z0-9_\- ]*\.gcb)", text, re.I)
+    batch_file = _normalize(bm.group(1)) if bm else None
+    return project, batch_file
+
+
+def _equip_kind(equipment_name):
+    """Coarse equipment TYPE from the (possibly instance-suffixed) equipment name.
+    Extraction-only: the app does its own routing/normalisation independently."""
+    n = (equipment_name or "").lower()
+    if "icp" in n:
+        return "icpms"
+    if "xrd" in n:
+        return "xrd"
+    if "dsc" in n:
+        return "dsc"
+    if "psa" in n or "particle" in n:
+        return "psa"
+    return "chromatograph"  # lcms / gcms / anything else
+
+
+def extract_document(text, equipment_name):
+    """Single entry point used by the forward worker. Returns a dict of extracted
+    values; the web app decides the flow/placement from these + the equipment type:
+      sample_set_id       - the grouping value for this equipment
+      pdf_from            - the batch/header "From" (chromatographs only)
+      calibration_project - set only when a calibration batch is detected
+    Never raises."""
+    out = {"sample_set_id": None, "pdf_from": None, "calibration_project": None}
+    if not text:
+        return out
+    try:
+        kind = _equip_kind(equipment_name)
+        if kind in ("dsc", "psa"):
+            out["sample_set_id"] = _reg_no(text)
+        elif kind == "xrd":
+            out["sample_set_id"] = _xrd_title(text)
+        else:
+            sid, frm = parse_batch(text, equipment_name)
+            out["sample_set_id"], out["pdf_from"] = sid, frm
+        project, _batch = _calibration(text)
+        out["calibration_project"] = project
+    except Exception as exc:
+        log.warning("extract_document failed: %s", exc)
+    return out

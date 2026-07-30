@@ -1062,16 +1062,10 @@ function Read-PrinterAndUrl {
         $script:PdfPassword = ConvertFrom-SecureStringPlain (Read-Host -AsSecureString 'PDF encryption password for this printer (blank = encryption OFF)')
     }
 
-    # Catalog share fallback dir: prompt-id.ps1 (running as the user) reads it
-    # when the SYSTEM-side catalog fetch fails. Default derives from the hub host.
-    # -CatalogShareDir skips the prompt so a fully-parameterized install (60-client
-    # scripted rollout) never blocks on Read-Host.
-    if (-not $CatalogShareDir) {
-        $hubHost = ([Uri]$HubUrl).Host
-        $defaultShare = "\\$hubHost\limsDocs\.vcp\catalog"
-        $s = Read-Host "Catalog share folder [$defaultShare]"
-        $script:CatalogShareDir = if ($s) { $s } else { $defaultShare }
-    }
+    # Catalog share fallback dir: NO LONGER PROMPTED. The dropdowns come from the
+    # hub /catalog fetch; there is no limsDocs SMB share to fall back to
+    # (Supabase-only). It stays blank unless a scripted install passes
+    # -CatalogShareDir explicitly (kept for setups that still use a share).
 
     Write-Info "Enrolling device '$DeviceName' ($Department / $Equipment) with the hub..."
     $enr = Invoke-HubEnrollment -BaseUrl $HubUrl -Key $EnrollKey `

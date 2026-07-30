@@ -473,7 +473,8 @@ def init_db():
                 test_parameter      TEXT,
                 pdf_name            TEXT,   -- stored file name
                 pdf_from            TEXT,   -- the app's print title / source doc
-                sample_set_id       TEXT,   -- instrument Sample Set ID (OCR-derived)
+                sample_set_id       TEXT,   -- OCR grouping value (sample set / reg.no / title)
+                calibration_project TEXT,   -- OCR calibration project (…$Calibration), if any
                 stored_path         TEXT,   -- local limsDocs path (deleted after push)
                 storage_path        TEXT,   -- Supabase Storage object key (idempotency)
                 size                INTEGER,
@@ -512,7 +513,7 @@ def init_db():
             ("registration_number", "TEXT"), ("test_method", "TEXT"),
             ("test_parameter", "TEXT"), ("pdf_name", "TEXT"),
             ("pdf_from", "TEXT"), ("storage_path", "TEXT"),
-            ("sample_set_id", "TEXT")])
+            ("sample_set_id", "TEXT"), ("calibration_project", "TEXT")])
         if not conn.execute("SELECT 1 FROM meta WHERE key='pd_version'").fetchone():
             conn.execute("INSERT INTO meta (key, value) VALUES ('pd_version', '')")
     _run(_init)
@@ -910,31 +911,34 @@ def _read_bytes(path):
 
 
 async def _extract_sample_set(row, pdf_bytes, current_from):
-    """Run Google Vision on the PDF and derive the Sample Set ID + a clean batch
-    'From' header (see ocr.parse_batch). Persists both onto the documents row and
-    returns (sample_set_id, pdf_from) for the forward payload. Best-effort: any
-    failure leaves the Sample Set ID unset and keeps the client-supplied From.
-    The transient 'extracting' status drives the dashboard's progress indicator."""
+    """Run Google Vision on the PDF and EXTRACT the grouping values the web app
+    needs: the Sample Set ID / Reg.No / XRD title (per equipment), a clean batch
+    'From', and a Calibration project name when present (see ocr.extract_document).
+    The hub only extracts — the app decides the flow/placement. Persists the values
+    on the documents row and returns (sample_set_id, pdf_from, calibration_project).
+    Best-effort; the transient 'extracting' status drives the dashboard indicator."""
     doc_id = row["document_id"]
     await run_db(lambda c: c.execute(
         "UPDATE documents SET status = 'extracting' WHERE id = ? "
         "AND status IN ('filed', 'forward_failed', 'extracting')", (doc_id,)))
-    sample_set_id, pdf_from = None, None
+    ex = {"sample_set_id": None, "pdf_from": None, "calibration_project": None}
     try:
         text = await ocr.vision_extract_text(
             HTTP_CLIENT, get_google_ocr_credentials(), pdf_bytes)
-        sample_set_id, pdf_from = ocr.parse_batch(text, row["equipment_name"])
-        log.info("OCR doc %s (%s): sample_set_id=%r",
-                 doc_id, row["equipment_name"], sample_set_id)
+        ex = ocr.extract_document(text, row["equipment_name"])
+        log.info("OCR doc %s (%s): sample_set_id=%r calibration=%r",
+                 doc_id, row["equipment_name"],
+                 ex.get("sample_set_id"), ex.get("calibration_project"))
     except Exception as exc:
-        log.warning("OCR doc %s failed (forwarding without a Sample Set ID): %s",
+        log.warning("OCR doc %s failed (forwarding without extracted values): %s",
                     doc_id, exc)
-    new_sid = (sample_set_id or "").strip() or None
-    new_from = (pdf_from or "").strip() or current_from
+    new_sid = (ex.get("sample_set_id") or "").strip() or None
+    new_from = (ex.get("pdf_from") or "").strip() or current_from
+    new_cal = (ex.get("calibration_project") or "").strip() or None
     await run_db(lambda c: c.execute(
-        "UPDATE documents SET sample_set_id = ?, pdf_from = ?, status = 'filed' "
-        "WHERE id = ?", (new_sid, new_from, doc_id)))
-    return new_sid, new_from
+        "UPDATE documents SET sample_set_id = ?, pdf_from = ?, calibration_project = ?, "
+        "status = 'filed' WHERE id = ?", (new_sid, new_from, new_cal, doc_id)))
+    return new_sid, new_from, new_cal
 
 
 async def _forward_one(row):
@@ -950,18 +954,25 @@ async def _forward_one(row):
     # forward retry never re-bills a Vision call.
     sample_set_id = row["sample_set_id"]
     pdf_from = row["pdf_from"]
-    if google_ocr_configured() and not (sample_set_id or "").strip():
-        sample_set_id, pdf_from = await _extract_sample_set(row, data, pdf_from)
+    calibration_project = row["calibration_project"]
+    if (google_ocr_configured() and not (sample_set_id or "").strip()
+            and not (calibration_project or "").strip()):
+        sample_set_id, pdf_from, calibration_project = await _extract_sample_set(row, data, pdf_from)
 
     r = await HTTP_CLIENT.post(
         "%s/storage/v1/object/%s/%s" % (url, bucket, row["storage_path"]),
         content=data,
         headers={"Authorization": "Bearer " + key,
                  "Content-Type": "application/pdf", "x-upsert": "false"})
-    # 409 = object already exists: a previous attempt uploaded it but the
+    # "Object already exists" = a previous attempt uploaded it but the
     # printer_documents insert failed. Treat as success for the storage step.
+    # Supabase Storage may signal this as HTTP 409, OR as a 400 whose body carries
+    # a 409/"Duplicate"/"already exists" payload - accept both so a retry is a no-op
+    # instead of a permanently stuck forward_failed.
     if r.status_code >= 300 and r.status_code != 409:
-        raise RuntimeError("storage upload HTTP %d: %s" % (r.status_code, r.text[:300]))
+        b = (r.text or "").lower()
+        if not ("duplicate" in b or "already exists" in b or "keyalreadyexists" in b or '"409"' in b):
+            raise RuntimeError("storage upload HTTP %d: %s" % (r.status_code, r.text[:300]))
 
     payload = {
         "pdf_name": row["pdf_name"], "pdf_from": pdf_from,
@@ -971,6 +982,7 @@ async def _forward_one(row):
         "test_parameter": row["test_parameter"], "printed_by": row["printed_by"],
         "size_of_pdf": row["size"], "storage_path": row["storage_path"],
         "sample_set_id": sample_set_id or None,
+        "calibration_project": calibration_project or None,
     }
     # UPSERT on storage_path (unique in printer_documents) so an at-least-once
     # retry after a post-commit failure (hub restart, or a gateway 5xx/timeout
@@ -991,8 +1003,8 @@ def _next_due(conn):
         "SELECT q.document_id, q.storage_path, q.attempts,"
         "       d.registration_number, d.department_name, d.equipment_name,"
         "       d.test_method, d.test_parameter, d.pdf_name, d.pdf_from,"
-        "       d.sample_set_id, d.device_name, d.stored_path, d.size, d.sha256,"
-        "       d.printed_by, d.job_id, d.status"
+        "       d.sample_set_id, d.calibration_project, d.device_name, d.stored_path,"
+        "       d.size, d.sha256, d.printed_by, d.job_id, d.status"
         "  FROM forward_queue q JOIN documents d ON d.id = q.document_id"
         " WHERE q.next_attempt <= ? ORDER BY q.next_attempt LIMIT 1",
         (time.time(),)).fetchone()

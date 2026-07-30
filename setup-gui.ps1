@@ -151,8 +151,8 @@ $txtPw  = Add-Text $p2 4 224 300; $txtPw.PasswordChar = '*'
 $lblPw2 = Add-Label $p2 'Repeat password:' 4 252 300
 $txtPw2 = Add-Text $p2 4 270 300; $txtPw2.PasswordChar = '*'
 
-$lblShare = Add-Label $p2 'Catalog share folder (auto-filled from the hub - normally leave as is):' 4 300 540
-$txtShare = Add-Text $p2 4 318 420
+# Catalog share folder is not collected: the dropdowns come from the hub /catalog
+# fetch and there is no limsDocs SMB share to fall back to (Supabase-only).
 
 # When a department is chosen, load its equipment list from the hub.
 function Load-Equipment {
@@ -171,7 +171,6 @@ function Load-Equipment {
     } catch { }
 }
 $cmbDept.Add_SelectedIndexChanged({ Load-Equipment })
-$script:autoShare = ''
 
 # ---- page 3: review + install ----------------------------------------------
 $p3 = New-Panel
@@ -226,17 +225,6 @@ function Assert-Clean([string]$v, [string]$what) {
     if ($v -match '"') { Show-Err "$what must not contain a double-quote (`") character."; throw 'bad input' }
 }
 
-function Update-AutoShare {
-    try {
-        $u = $txtHub.Text.Trim()
-        if ($u -and $u -notmatch '^(?i)https?://') { $u = 'http://' + $u }
-        $hubHost = ([Uri]$u).Host
-        $auto = "\\$hubHost\limsDocs\.vcp\catalog"
-        if (-not $txtShare.Text -or $txtShare.Text -eq $script:autoShare) { $txtShare.Text = $auto }
-        $script:autoShare = $auto
-    } catch { }
-}
-
 $btnLoad.Add_Click({
     $lblConn.ForeColor = [System.Drawing.Color]::DimGray
     $lblConn.Text = 'Contacting the hub...'
@@ -256,7 +244,6 @@ $btnLoad.Add_Click({
         if ($cmbDept.Items.Count) { $cmbDept.SelectedIndex = 0 }   # triggers equipment load
         $lblConn.ForeColor = [System.Drawing.Color]::Green
         $lblConn.Text = "Hub OK - enroll key accepted. Departments: $($depts -join ', ')"
-        Update-AutoShare
     } catch {
         $lblConn.ForeColor = [System.Drawing.Color]::Firebrick
         $m = $_.Exception.Message
@@ -272,8 +259,7 @@ function Build-Summary {
             "Printer name:  $($txtPrinter.Text)`r`n" +
             "Hub URL:       $($txtHub.Text)`r`n" +
             "Device:        $($txtDev.Text)  ($($cmbDept.Text) / $($cmbEquip.Text))`r`n" +
-            "PDF password:  $pw`r`n" +
-            "Catalog share: $($txtShare.Text)")
+            "PDF password:  $pw")
     } else {
         $txtSummary.Text = ("Mode:          legacy direct-URL printer ($Mode)`r`n" +
             "Printer name:  $($txtPrinter.Text)`r`n" +
@@ -293,20 +279,12 @@ function Build-Args {
     # -> array of tokens (flag names + user values); Quote-Args wraps every value.
     $a = @('-Action', $Mode, '-PrinterName', $txtPrinter.Text.Trim())
     if ($rbHub.Checked) {
-        # Never pass an EMPTY -CatalogShareDir: setup.ps1 runs hidden with no
-        # console, so its Read-Host fallback for an empty value would hang the
-        # install. Compute the default from the hub host if the box is empty.
-        $share = $txtShare.Text.Trim()
-        if (-not $share) {
-            try {
-                $hu = $txtHub.Text.Trim(); if ($hu -notmatch '^(?i)https?://') { $hu = 'http://' + $hu }
-                $share = "\\" + ([Uri]$hu).Host + "\limsDocs\.vcp\catalog"
-            } catch { $share = "\\hub\limsDocs\.vcp\catalog" }
-        }
+        # The catalog-share folder is no longer collected or sent (Supabase-only;
+        # the hub /catalog fetch is the source of the dropdowns). setup.ps1 no longer
+        # prompts for it either, so omitting the flag is safe.
         $a += @('-HubUrl', $txtHub.Text.Trim(), '-DeviceName', $txtDev.Text.Trim(),
                 '-Department', $cmbDept.Text.Trim(), '-Equipment', $cmbEquip.Text.Trim(),
-                '-EnrollKey', $txtKey.Text.Trim(),
-                '-CatalogShareDir', $share)
+                '-EnrollKey', $txtKey.Text.Trim())
         if (-not $txtPw.Text) { $a += @('-NoPassword') }  # password handled via -PasswordFile
     } else {
         $a += @('-Url', $txtUrl.Text.Trim())
@@ -372,7 +350,6 @@ function Start-Install {
             Assert-Clean $txtKey.Text 'The enroll key'
             Assert-Clean $cmbDept.Text 'The department'
             Assert-Clean $cmbEquip.Text 'The equipment'
-            Assert-Clean $txtShare.Text 'The catalog share folder'
         }
     } catch { return }
     $quoted = Quote-Args (Build-Args)
@@ -418,13 +395,12 @@ $btnNext.Add_Click({
                 if ($txtHub.Text -match '/ingest/') { Show-Err 'That is an /ingest/ link, not the hub base URL. Use just http://host:8000.'; return }
                 if ($txtHub.Text.Trim() -notmatch '^(?i)https?://') { $txtHub.Text = 'http://' + $txtHub.Text.Trim() }
                 if (-not $txtKey.Text.Trim()) { Show-Err 'Paste the enroll key (from the hub console).'; return }
-                Update-AutoShare
             } else {
                 if (-not $txtUrl.Text.Trim()) { Show-Err 'Enter the target URL.'; return }
             }
             # legacy mode has no device fields
             $hub = $rbHub.Checked
-            foreach ($c in @($lblDev, $txtDev, $lblDevOk, $lblDept, $cmbDept, $lblEquip, $cmbEquip, $lblPw, $txtPw, $lblPw2, $txtPw2, $lblShare, $txtShare)) {
+            foreach ($c in @($lblDev, $txtDev, $lblDevOk, $lblDept, $cmbDept, $lblEquip, $cmbEquip, $lblPw, $txtPw, $lblPw2, $txtPw2)) {
                 $c.Enabled = $hub
             }
             Show-Page 1
@@ -436,7 +412,6 @@ $btnNext.Add_Click({
                 if (-not $cmbDept.Text.Trim()) { Show-Err 'Pick or type a department.'; return }
                 if (-not $cmbEquip.Text.Trim()) { Show-Err 'Pick or type an equipment name.'; return }
                 if ($txtPw.Text -cne $txtPw2.Text) { Show-Err 'The two passwords do not match.'; return }
-                if (-not $txtShare.Text.Trim()) { Update-AutoShare }
             }
             Build-Summary
             Show-Page 2
