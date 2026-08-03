@@ -460,6 +460,14 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS printer_data_dept_equip
                 ON printer_data (department_name, equipment_name);
+            -- Local mirror of the Supabase `equipment` master (name + its
+            -- department, decoded from department_id). Feeds the installer's
+            -- equipment dropdown; selecting an equipment auto-fills its department.
+            CREATE TABLE IF NOT EXISTS equipment_master (
+                equipment_name  TEXT,
+                department_name TEXT,
+                UNIQUE (equipment_name, department_name)
+            );
             -- Each printed PDF. Mirrors the Supabase printer_documents columns
             -- (plus local bookkeeping: device_id, stored_path, status, queue).
             CREATE TABLE IF NOT EXISTS documents (
@@ -576,12 +584,15 @@ def _catalog_snapshot(conn):
 
 
 def catalog_payload(snapshot, department_name, equipment_name):
-    """Cascading catalog for one printer (its department + equipment): a list of
-    registrations, each with its test methods, each method with its parameters.
-    Feeds the 3 dependent dropdowns in the print prompt."""
+    """Cascading catalog for one printer: the registrations of its DEPARTMENT, each
+    with its test methods/parameters. Registrations are filtered by department only
+    (a registration belongs to a department via sample_registrations.dept_param_map);
+    equipment is the printer's own identity used for filing, not a registration
+    filter. equipment_name is accepted for signature compatibility but not used to
+    filter. Feeds the 3 dependent dropdowns in the print prompt."""
     tree = {}  # reg -> {method -> set(param)}
     for r in snapshot["rows"]:
-        if r["department_name"] != department_name or r["equipment_name"] != equipment_name:
+        if r["department_name"] != department_name:
             continue
         if not _pd_available(r["status"]):
             continue
@@ -643,9 +654,10 @@ async def export_catalog():
 
 
 def validate_job(conn, department_name, equipment_name, reg_no, test_method, test_parameter):
-    """Returns a held_reason string, or None when the job may be filed. The full
-    (department, equipment, registration, method, parameter) tuple must exist and
-    be available in the printer_data mirror."""
+    """Returns a held_reason string, or None when the job may be filed. The
+    (department, registration, method, parameter) tuple must exist and be available
+    in the mirror. Equipment is the printer's own identity (used for filing), not a
+    registration filter — registrations are scoped to the department only."""
     if not reg_no:
         return "missing_registration"
     if not test_method:
@@ -654,9 +666,9 @@ def validate_job(conn, department_name, equipment_name, reg_no, test_method, tes
         return "missing_test"
     row = conn.execute(
         "SELECT status FROM printer_data WHERE registration_number = ? "
-        "AND department_name = ? AND equipment_name = ? "
+        "AND department_name = ? "
         "AND test_method = ? AND test_parameter = ?",
-        (reg_no, department_name, equipment_name, test_method, test_parameter)).fetchone()
+        (reg_no, department_name, test_method, test_parameter)).fetchone()
     if not row or not _pd_available(row["status"]):
         return "unknown_registration"
     return None
@@ -806,45 +818,90 @@ def _rest_headers(key):
     return {"apikey": key, "Authorization": "Bearer " + key}
 
 
-async def _refresh_from_supabase(url, key, version):
-    """Refetch printer_data and replace the local mirror + version watermark in
-    one transaction, then export the share files (which read that watermark)."""
-    global _sync_status
-    r = await HTTP_CLIENT.get(
-        url + "/rest/v1/printer_data"
-              "?select=registration_number,department_name,equipment_name,"
-              "status,test_method,test_parameter",
-        headers=_rest_headers(key))
+async def _sb_get(url, key, path):
+    """GET a PostgREST collection; raise a helpful error on non-2xx / non-list."""
+    r = await HTTP_CLIENT.get(url + "/rest/v1/" + path, headers=_rest_headers(key))
     if not r.is_success:
-        # Surface the response body so the admin can see why (e.g. auth error,
-        # wrong URL, RLS denial) rather than just the status code.
         try:
             detail = r.json()
         except Exception:
             detail = r.text[:200]
-        raise ValueError("HTTP %d fetching printer_data: %s" % (r.status_code, detail))
-    rows = r.json()
-    if not isinstance(rows, list):
-        # A non-list body usually means the URL points at the Studio UI or a
-        # gateway that returned an HTML/text page instead of PostgREST JSON.
+        raise ValueError("HTTP %d fetching %s: %s"
+                         % (r.status_code, path.split("?")[0], detail))
+    data = r.json()
+    if not isinstance(data, list):
         raise ValueError(
-            "Unexpected response type (%s) — is SUPABASE_URL the REST API "
-            "endpoint (PostgREST), not the Studio UI? Got: %r" % (type(rows).__name__, str(rows)[:120]))
+            "Unexpected response for %s — is SUPABASE_URL the PostgREST endpoint "
+            "(not the Studio UI)? Got: %r" % (path.split("?")[0], str(data)[:120]))
+    return data
+
+
+async def _refresh_from_supabase(url, key, version):
+    """Rebuild the local catalog DIRECTLY from the source tables (no printer_data
+    projection): the `equipment` master (name + its department, decoded via
+    `departments`) and `sample_registrations` (registration -> its department(s)
+    via dept_param_map, whose UUID keys are decoded through `departments`; its tests
+    are the mapped test_parameters + the registration's test_method). Registrations
+    are DEPARTMENT-scoped only — equipment is the printer's own identity, used for
+    filing, not to filter registrations. Rebuilds printer_data + equipment_master."""
+    global _sync_status
+    LIM = "limit=100000"
+    departments = await _sb_get(url, key, "departments?select=id,name&" + LIM)
+    dept_name = {d.get("id"): (d.get("name") or "").strip()
+                 for d in departments if d.get("id")}
+
+    equipment = await _sb_get(
+        url, key, "equipment?select=name,department_id&is_latest=eq.true&" + LIM)
+    equip_rows, seen_eq = [], set()
+    for e in equipment:
+        nm = (e.get("name") or "").strip()
+        dn = dept_name.get(e.get("department_id"))
+        if nm and dn and (nm, dn) not in seen_eq:
+            seen_eq.add((nm, dn))
+            equip_rows.append((nm, dn))
+
+    tparams = await _sb_get(url, key, "test_parameters?select=id,test_name&" + LIM)
+    param_name = {t.get("id"): (t.get("test_name") or "").strip()
+                  for t in tparams if t.get("id")}
+    tmethods = await _sb_get(url, key, "test_methods?select=id,test_method_number&" + LIM)
+    method_no = {t.get("id"): (t.get("test_method_number") or "").strip()
+                 for t in tmethods if t.get("id")}
+
+    regs = await _sb_get(
+        url, key, "sample_registrations?select=reg_no,test_method_id,dept_param_map&" + LIM)
+    pd_rows, seen_pd = [], set()
+    for reg in regs:
+        reg_no = (reg.get("reg_no") or "").strip()
+        if not reg_no:
+            continue
+        method = method_no.get(reg.get("test_method_id"), "")
+        dpm = reg.get("dept_param_map") or {}
+        if not isinstance(dpm, dict):
+            continue
+        for dept_uuid, param_ids in dpm.items():
+            dn = dept_name.get(dept_uuid)
+            if not dn:
+                continue
+            for pid in (param_ids or []):
+                pn = param_name.get(pid)
+                if not pn:
+                    continue
+                keyt = (reg_no, dn, method, pn)
+                if keyt not in seen_pd:
+                    seen_pd.add(keyt)
+                    pd_rows.append(keyt)
 
     def _replace(conn):
         conn.execute("DELETE FROM printer_data")
-        for row in rows:
+        for (reg_no, dn, method, pn) in pd_rows:
             conn.execute(
                 "INSERT OR IGNORE INTO printer_data (registration_number, "
                 "department_name, equipment_name, status, test_method, test_parameter) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (row.get("registration_number"), row.get("department_name"),
-                 row.get("equipment_name"), row.get("status"),
-                 row.get("test_method"), row.get("test_parameter")))
-        # Stamp the version in the SAME transaction, BEFORE export_catalog() reads
-        # it, so the exported files / /catalog report the version they actually
-        # contain (not the previous one). Skip when version is None (fallback
-        # unconditional-poll mode: no version function installed).
+                "VALUES (?, ?, '', 'open', ?, ?)", (reg_no, dn, method, pn))
+        conn.execute("DELETE FROM equipment_master")
+        for (nm, dn) in equip_rows:
+            conn.execute("INSERT OR IGNORE INTO equipment_master "
+                         "(equipment_name, department_name) VALUES (?, ?)", (nm, dn))
         if version is not None:
             set_meta(conn, "pd_version", str(version))
 
@@ -852,23 +909,16 @@ async def _refresh_from_supabase(url, key, version):
     await export_catalog()
     _sync_status["last_ok"] = datetime.now(timezone.utc).isoformat()
     _sync_status["last_error"] = None
-    _sync_status["row_count"] = len(rows)
-    log.info("printer_data synced from Supabase: %d rows (version %s)",
-             len(rows), str(version)[:12] if version is not None else "n/a")
+    _sync_status["row_count"] = len(pd_rows)
+    log.info("catalog synced from source tables: %d registration rows, %d equipment",
+             len(pd_rows), len(equip_rows))
 
 
 async def catalog_sync_task():
-    """Poll printer_data_version() (~poll_seconds); on change, refetch
-    printer_data. Idles when Supabase is not configured.
-
-    Falls back to unconditional polling when printer_data_version() is not
-    installed in Supabase (RPC returns non-2xx). Uses a sentinel initial value
-    so a null/None return from the function still triggers the first sync.
-    Errors are recorded in _sync_status so the dashboard can surface them.
-    """
+    """Rebuild the local catalog from the Supabase SOURCE tables every poll_seconds
+    (equipment + sample_registrations + departments). Idles when Supabase is not
+    configured. Errors are recorded in _sync_status for the dashboard."""
     global _sync_status
-    last_version = object()  # unique sentinel; no JSON value (incl. null) equals this
-    rpc_available = None     # None=unknown, True=working, False=unavailable
     while True:
         try:
             if not supabase_configured():
@@ -876,32 +926,13 @@ async def catalog_sync_task():
                 continue
             url = CONFIG["supabase_url"].rstrip("/")
             key = get_service_key()
-            # PostgREST exposes functions as RPC via POST (empty JSON body).
-            r = await HTTP_CLIENT.post(url + "/rest/v1/rpc/printer_data_version",
-                                       headers=_rest_headers(key), json={})
-            if r.is_success:
-                if rpc_available is False:
-                    log.info("printer_data_version() RPC now available")
-                rpc_available = True
-                _sync_status["rpc_available"] = True
-                version = r.json()
-                if version != last_version:
-                    await _refresh_from_supabase(url, key, version)
-                    last_version = version
-            else:
-                # Function not installed or RPC unavailable: poll unconditionally.
-                if rpc_available is not False:
-                    log.info("printer_data_version() RPC unavailable (HTTP %d); "
-                             "polling printer_data unconditionally", r.status_code)
-                rpc_available = False
-                _sync_status["rpc_available"] = False
-                await _refresh_from_supabase(url, key, None)
+            await _refresh_from_supabase(url, key, None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             err = str(exc)
             _sync_status["last_error"] = err
-            log.warning("printer_data sync: %s", err)
+            log.warning("catalog sync: %s", err)
         await asyncio.sleep(poll_seconds())
 
 
@@ -1235,7 +1266,7 @@ async def list_departments(x_enroll_key: str = Header(default="")):
     'Choose Department' dropdown."""
     require_enroll(x_enroll_key)
     rows = await run_db(lambda c: c.execute(
-        "SELECT DISTINCT department_name FROM printer_data "
+        "SELECT DISTINCT department_name FROM equipment_master "
         "WHERE department_name IS NOT NULL AND department_name <> '' "
         "ORDER BY department_name").fetchall())
     return {"departments": [r["department_name"] for r in rows]}
@@ -1243,21 +1274,21 @@ async def list_departments(x_enroll_key: str = Header(default="")):
 
 @app.get("/equipment")
 async def list_equipment(department: str = "", x_enroll_key: str = Header(default="")):
-    """Distinct equipment names, optionally scoped to a department - feeds the
-    installer's 'Choose Equipment' dropdown after a department is picked."""
+    """Equipment names from the `equipment` master, each WITH its department, so the
+    installer can auto-fill the department when an equipment is chosen. Optionally
+    scoped to a department. Response items are {name, department}."""
     require_enroll(x_enroll_key)
     if department:
         rows = await run_db(lambda c: c.execute(
-            "SELECT DISTINCT equipment_name FROM printer_data "
-            "WHERE department_name = ? AND equipment_name IS NOT NULL "
-            "AND equipment_name <> '' ORDER BY equipment_name",
-            (department,)).fetchall())
+            "SELECT DISTINCT equipment_name, department_name FROM equipment_master "
+            "WHERE department_name = ? AND equipment_name <> '' "
+            "ORDER BY equipment_name", (department,)).fetchall())
     else:
         rows = await run_db(lambda c: c.execute(
-            "SELECT DISTINCT equipment_name FROM printer_data "
-            "WHERE equipment_name IS NOT NULL AND equipment_name <> '' "
-            "ORDER BY equipment_name").fetchall())
-    return {"equipment": [r["equipment_name"] for r in rows]}
+            "SELECT DISTINCT equipment_name, department_name FROM equipment_master "
+            "WHERE equipment_name <> '' ORDER BY equipment_name").fetchall())
+    return {"equipment": [{"name": r["equipment_name"],
+                           "department": r["department_name"]} for r in rows]}
 
 
 async def _set_device_password_remote(device_name, password):

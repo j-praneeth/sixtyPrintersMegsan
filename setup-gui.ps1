@@ -98,7 +98,7 @@ Add-Label $p1 'Enroll key  (shown in the hub console / dashboard Devices tab - p
 $txtKey = Add-Text $p1 4 142 420
 
 $btnLoad = New-Object System.Windows.Forms.Button
-$btnLoad.Text = 'Test hub && load departments'
+$btnLoad.Text = 'Test hub && load equipment'
 $btnLoad.Location = '4,180'; $btnLoad.Size = New-Object System.Drawing.Size(200, 28)
 $p1.Controls.Add($btnLoad)
 $lblConn = New-Object System.Windows.Forms.Label
@@ -134,43 +134,36 @@ $txtDev.Add_TextChanged({
         $lblDevOk.Text = 'letters/digits then . _ - only'; $lblDevOk.ForeColor = [System.Drawing.Color]::Firebrick
     }
 })
-$lblDept = Add-Label $p2 'Department (loaded from the hub - pick one):' 4 110 400
-$cmbDept = New-Object System.Windows.Forms.ComboBox
-$cmbDept.Location = '4,128'; $cmbDept.Size = New-Object System.Drawing.Size(300, 24)
-$cmbDept.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
-$p2.Controls.Add($cmbDept)
-
-$lblEquip = Add-Label $p2 'Equipment (choose the department first):' 4 158 400
+# Equipment is chosen first (loaded from the hub's `equipment` table); its
+# department is then auto-filled from the equipment's own department.
+$lblEquip = Add-Label $p2 'Equipment (loaded from the hub - pick one):' 4 110 400
 $cmbEquip = New-Object System.Windows.Forms.ComboBox
-$cmbEquip.Location = '4,176'; $cmbEquip.Size = New-Object System.Drawing.Size(300, 24)
-$cmbEquip.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
+$cmbEquip.Location = '4,128'; $cmbEquip.Size = New-Object System.Drawing.Size(300, 24)
+# DropDownList = pick from the loaded list only; the user cannot type a free value.
+$cmbEquip.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $p2.Controls.Add($cmbEquip)
 
-$lblPw  = Add-Label $p2 'Set PDF password for this printer (leave blank = OFF):' 4 206 540
-$txtPw  = Add-Text $p2 4 224 300; $txtPw.PasswordChar = '*'
-$lblPw2 = Add-Label $p2 'Repeat password:' 4 252 300
-$txtPw2 = Add-Text $p2 4 270 300; $txtPw2.PasswordChar = '*'
+$lblDept = Add-Label $p2 'Department (fixed - set from the selected equipment):' 4 158 400
+$cmbDept = Add-Text $p2 4 176 300
+$cmbDept.ReadOnly = $true
+$cmbDept.BackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+
+# PDF-password fields removed: printers are enrolled without per-printer
+# encryption from this wizard (always -NoPassword). Set/change a password later
+# via setup.ps1 -Action changepassword if ever needed.
 
 # Catalog share folder is not collected: the dropdowns come from the hub /catalog
 # fetch and there is no limsDocs SMB share to fall back to (Supabase-only).
 
-# When a department is chosen, load its equipment list from the hub.
-function Load-Equipment {
-    try {
-        $u = $txtHub.Text.Trim()
-        if ($u -and $u -notmatch '^(?i)https?://') { $u = 'http://' + $u }
-        $key = $txtKey.Text.Trim()
-        $dept = $cmbDept.Text.Trim()
-        if (-not $u -or -not $key -or -not $dept) { return }
-        $uri = ($u.TrimEnd('/') + '/equipment?department=' + [uri]::EscapeDataString($dept))
-        $resp = Invoke-WebRequest -UseBasicParsing -Uri $uri -Headers @{ 'X-Enroll-Key' = $key } -TimeoutSec 10
-        $eq = @(($resp.Content | ConvertFrom-Json).equipment)
-        $cmbEquip.Items.Clear()
-        foreach ($e in $eq) { [void]$cmbEquip.Items.Add($e) }
-        if ($cmbEquip.Items.Count) { $cmbEquip.SelectedIndex = 0 }
-    } catch { }
-}
-$cmbDept.Add_SelectedIndexChanged({ Load-Equipment })
+# equipment name -> its department (populated when the equipment list loads).
+$script:equipDeptMap = @{}
+# Choosing an equipment auto-fills its department (fetched from the equipment table).
+$cmbEquip.Add_SelectedIndexChanged({
+    $sel = $cmbEquip.Text.Trim()
+    if ($script:equipDeptMap -and $script:equipDeptMap.ContainsKey($sel)) {
+        $cmbDept.Text = [string]$script:equipDeptMap[$sel]
+    }
+})
 
 # ---- page 3: review + install ----------------------------------------------
 $p3 = New-Panel
@@ -215,7 +208,7 @@ function Show-Page([int]$i) {
     $header.Text = @('Step 1 of 3 - Connection', 'Step 2 of 3 - Printer and device',
                      'Step 3 of 3 - Review and install')[$i]
     $sub.Text = @('Pick the mode and tell the wizard where the hub is. You can paste into every box.',
-                  'Name the printer, give the device a unique name, and (optionally) set its PDF password.',
+                  'Name the printer, give the device a unique name, and pick its equipment (the department is set automatically).',
                   'Check the summary, then click Install.')[$i]
 }
 
@@ -236,14 +229,20 @@ $btnLoad.Add_Click({
         if ($u -match '/ingest/') { throw 'That is an /ingest/ link, not the hub base URL. Use just http://host:8000.' }
         $key = $txtKey.Text.Trim()
         if (-not $key) { throw 'Paste the enroll key first.' }
-        $resp = Invoke-WebRequest -UseBasicParsing -Uri ($u.TrimEnd('/') + '/departments') `
+        $resp = Invoke-WebRequest -UseBasicParsing -Uri ($u.TrimEnd('/') + '/equipment') `
             -Headers @{ 'X-Enroll-Key' = $key } -TimeoutSec 10
-        $depts = @(($resp.Content | ConvertFrom-Json).departments)
-        $cmbDept.Items.Clear(); $cmbEquip.Items.Clear()
-        foreach ($d in $depts) { [void]$cmbDept.Items.Add($d) }
-        if ($cmbDept.Items.Count) { $cmbDept.SelectedIndex = 0 }   # triggers equipment load
+        $eq = @(($resp.Content | ConvertFrom-Json).equipment)
+        $cmbEquip.Items.Clear(); $cmbDept.Text = ''
+        $script:equipDeptMap = @{}
+        foreach ($e in $eq) {
+            $nm = [string]$e.name; $dn = [string]$e.department
+            if (-not $nm) { continue }
+            [void]$cmbEquip.Items.Add($nm)
+            $script:equipDeptMap[$nm] = $dn
+        }
+        if ($cmbEquip.Items.Count) { $cmbEquip.SelectedIndex = 0 }   # auto-fills department
         $lblConn.ForeColor = [System.Drawing.Color]::Green
-        $lblConn.Text = "Hub OK - enroll key accepted. Departments: $($depts -join ', ')"
+        $lblConn.Text = "Hub OK - enroll key accepted. Equipment loaded: $($cmbEquip.Items.Count)"
     } catch {
         $lblConn.ForeColor = [System.Drawing.Color]::Firebrick
         $m = $_.Exception.Message
@@ -254,12 +253,10 @@ $btnLoad.Add_Click({
 
 function Build-Summary {
     if ($rbHub.Checked) {
-        $pw = if ($txtPw.Text) { '******** (AES-256 on)' } else { '(none - encryption off)' }
         $txtSummary.Text = ("Mode:          hub printer ($Mode)`r`n" +
             "Printer name:  $($txtPrinter.Text)`r`n" +
             "Hub URL:       $($txtHub.Text)`r`n" +
-            "Device:        $($txtDev.Text)  ($($cmbDept.Text) / $($cmbEquip.Text))`r`n" +
-            "PDF password:  $pw")
+            "Device:        $($txtDev.Text)  ($($cmbDept.Text) / $($cmbEquip.Text))")
     } else {
         $txtSummary.Text = ("Mode:          legacy direct-URL printer ($Mode)`r`n" +
             "Printer name:  $($txtPrinter.Text)`r`n" +
@@ -285,7 +282,7 @@ function Build-Args {
         $a += @('-HubUrl', $txtHub.Text.Trim(), '-DeviceName', $txtDev.Text.Trim(),
                 '-Department', $cmbDept.Text.Trim(), '-Equipment', $cmbEquip.Text.Trim(),
                 '-EnrollKey', $txtKey.Text.Trim())
-        if (-not $txtPw.Text) { $a += @('-NoPassword') }  # password handled via -PasswordFile
+        $a += @('-NoPassword')  # this wizard never sets a per-printer PDF password
     } else {
         $a += @('-Url', $txtUrl.Text.Trim())
     }
@@ -354,27 +351,15 @@ function Start-Install {
     } catch { return }
     $quoted = Quote-Args (Build-Args)
     if ($DryRunOut) {
-        # Dry run demonstrates the argument SHAPE only. If a password is set it goes
-        # via -PasswordFile "<pwfile>" (a placeholder here) - the secret is never
-        # written to the dry-run file.
-        $shape = $quoted
-        if ($rbHub.Checked -and $txtPw.Text) { $shape += ' -PasswordFile "<pwfile>"' }
-        [System.IO.File]::WriteAllText($DryRunOut, $shape, (New-Object System.Text.UTF8Encoding($false)))
+        # Dry run demonstrates the argument SHAPE only.
+        [System.IO.File]::WriteAllText($DryRunOut, $quoted, (New-Object System.Text.UTF8Encoding($false)))
         $lblResult.ForeColor = [System.Drawing.Color]::Green
         $lblResult.Text = 'DRY RUN - arguments written.'
         return
     }
-    # The passphrase is written to a temp file locked to SYSTEM+Administrators and
-    # passed as -PasswordFile, so it never appears on the child process command line
-    # (readable via WMI / Win32_Process CommandLine) nor in a 4688 audit record.
-    # setup.ps1 reads then securely deletes the file.
+    # This wizard never sets a per-printer PDF password (-NoPassword), so no
+    # passphrase file is created or passed.
     $pwFile = ''
-    if ($rbHub.Checked -and $txtPw.Text) {
-        $pwFile = Join-Path $env:TEMP ('vcp-pw-' + [guid]::NewGuid().ToString('n') + '.tmp')
-        [System.IO.File]::WriteAllText($pwFile, $txtPw.Text, (New-Object System.Text.UTF8Encoding($false)))
-        try { & icacls "$pwFile" /inheritance:r /grant:r "SYSTEM:F" "Administrators:F" | Out-Null } catch {}
-        $quoted += ' -PasswordFile "' + $pwFile + '"'
-    }
     $btnNext.Enabled = $false; $btnBack.Enabled = $false; $btnClose.Text = 'Close'
     # $quoted holds no secret (only a file path), so it can be shown verbatim.
     $lblResult.Text = ''; $txtLog.Text = "Running setup.ps1 $quoted`r`n`r`n"
@@ -400,7 +385,7 @@ $btnNext.Add_Click({
             }
             # legacy mode has no device fields
             $hub = $rbHub.Checked
-            foreach ($c in @($lblDev, $txtDev, $lblDevOk, $lblDept, $cmbDept, $lblEquip, $cmbEquip, $lblPw, $txtPw, $lblPw2, $txtPw2)) {
+            foreach ($c in @($lblDev, $txtDev, $lblDevOk, $lblDept, $cmbDept, $lblEquip, $cmbEquip)) {
                 $c.Enabled = $hub
             }
             Show-Page 1
@@ -409,9 +394,8 @@ $btnNext.Add_Click({
             if (-not $txtPrinter.Text.Trim()) { Show-Err 'Enter a printer name.'; return }
             if ($rbHub.Checked) {
                 if ($txtDev.Text.Trim() -notmatch $DeviceNameRegex) { Show-Err 'Enter a valid device name (letters/digits then . _ - only, max 64).'; return }
-                if (-not $cmbDept.Text.Trim()) { Show-Err 'Pick or type a department.'; return }
-                if (-not $cmbEquip.Text.Trim()) { Show-Err 'Pick or type an equipment name.'; return }
-                if ($txtPw.Text -cne $txtPw2.Text) { Show-Err 'The two passwords do not match.'; return }
+                if (-not $cmbEquip.Text.Trim()) { Show-Err 'Pick an equipment.'; return }
+                if (-not $cmbDept.Text.Trim()) { Show-Err 'Select an equipment so its department is set.'; return }
             }
             Build-Summary
             Show-Page 2
