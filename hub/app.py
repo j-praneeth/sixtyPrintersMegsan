@@ -1320,17 +1320,19 @@ async def enroll_device(request: Request, x_enroll_key: str = Header(default="")
     if not department or not equipment:
         raise HTTPException(status_code=400,
                             detail="department_name and equipment_name are required.")
-    known = await run_db(lambda c: c.execute(
-        "SELECT 1 FROM printer_data WHERE department_name = ? AND equipment_name = ? LIMIT 1",
-        (department, equipment)).fetchone())
-    if not known:
-        raise HTTPException(status_code=400,
-                            detail="Unknown department/equipment: %r / %r" % (department, equipment))
+    pd_count = await run_db(lambda c: c.execute("SELECT COUNT(*) FROM printer_data").fetchone()[0])
+    if pd_count > 0:
+        known = await run_db(lambda c: c.execute(
+            "SELECT 1 FROM printer_data WHERE department_name = ? AND equipment_name = ? LIMIT 1",
+            (department, equipment)).fetchone())
+        if not known:
+            raise HTTPException(status_code=400,
+                                detail="Unknown department/equipment: %r / %r" % (department, equipment))
     dup = await run_db(lambda c: c.execute(
-        "SELECT 1 FROM devices WHERE device_name = ? COLLATE NOCASE", (name,)).fetchone())
+        "SELECT id FROM devices WHERE device_name = ? COLLATE NOCASE", (name,)).fetchone())
     if dup:
-        raise HTTPException(status_code=409,
-                            detail="device_name already exists (case-insensitive): %r" % name)
+        await run_db(lambda c: c.execute("DELETE FROM devices WHERE id = ?", (dup["id"],)))
+        log.info("enroll: auto-revoked existing device %r (id=%s) to re-enroll", name, dup["id"])
 
     token = secrets.token_urlsafe(24)
     created = now_iso()
