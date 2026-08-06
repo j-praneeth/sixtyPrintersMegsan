@@ -1192,6 +1192,7 @@ async def ingest(token: str, request: Request):
     reg_no = (fields.get("registration_number") or "").strip()
     test_method = (fields.get("test_method") or "").strip()
     test_parameter = (fields.get("test_parameter") or "").strip()
+    calibration = (fields.get("calibration") or "").strip()
     printed_by = (fields.get("printed_by") or fields.get("user") or "").strip()
     # The device row is authoritative for identity/routing; client-sent values
     # are only logged when they disagree (a misconfigured client, not a decider).
@@ -1212,8 +1213,17 @@ async def ingest(token: str, request: Request):
         log.warning("ingest %s: client sha256 mismatch for %r (client %s != computed %s)",
                     token[:8], pdf_from, fields["sha256"][:16], sha256[:16])
 
-    reason = await run_db(lambda c: validate_job(
-        c, department_name, equipment_name, reg_no, test_method, test_parameter))
+    if calibration == "Yes":
+        reason = None
+        if not reg_no:
+            reg_no = "Calibration"
+        if not test_method:
+            test_method = "Calibration"
+        if not test_parameter:
+            test_parameter = "Calibration"
+    else:
+        reason = await run_db(lambda c: validate_job(
+            c, department_name, equipment_name, reg_no, test_method, test_parameter))
     received = now_iso()
 
     # Serial base name = the print/document title (repeat prints of the same title

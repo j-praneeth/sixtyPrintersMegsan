@@ -375,7 +375,7 @@ def prompt_registration_in_user_session(out_file, doc_name, timeout_sec=180,
             k32.CloseHandle(user_tok)
     except Exception as exc:
         log("Registration prompt error (ignored): %s" % exc)
-        return (None, None, None, False)
+        return (None, None, None, False, None)
 
     # Read whatever the dialog wrote and consume it. JSON
     # {"registration_number","test_method","test_parameter"} = a hub answer;
@@ -395,16 +395,17 @@ def prompt_registration_in_user_session(out_file, doc_name, timeout_sec=180,
                     obj = json.loads(raw)
                     if isinstance(obj, dict):
                         if obj.get("cancel"):
-                            return (None, None, None, True)
+                            return (None, None, None, True, None)
                         reg_val = str(obj.get("registration_number",
                                               obj.get("id", ""))).strip() or None
                         method_val = str(obj.get("test_method", "")).strip() or None
                         param_val = str(obj.get("test_parameter",
                                                 obj.get("test", ""))).strip() or None
-                        return (reg_val, method_val, param_val, False)
+                        calibration_val = str(obj.get("calibration", "")).strip() or None
+                        return (reg_val, method_val, param_val, False, calibration_val)
                 except Exception:
                     pass  # not JSON -> treat the whole file as the id (legacy)
-                return (raw or None, None, None, False)
+                return (raw or None, None, None, False, None)
     except Exception:
         pass
     return (None, None, None, False)
@@ -466,9 +467,9 @@ def show_registration_prompt(config, printer_cfg, user_name, job_id, doc_name,
                     os.remove(catalog_file)
                 except Exception:
                     pass
-    reg_id, _m, _p, cancelled = prompt_registration_in_user_session(
+    reg_id, _m, _p, cancelled, _c = prompt_registration_in_user_session(
         out_file, doc_name, timeout_sec=timeout, batch_note=batch_note)
-    return reg_id, None, None, cancelled  # legacy printers carry no method/param
+    return reg_id, None, None, cancelled, None  # legacy printers carry no method/param/calibration
 
 
 # --------------------------------------------------------------------------- #
@@ -588,15 +589,16 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
                 if state.get("cancel"):
                     log("Batch prompt: job %s follows the batch CANCEL from job "
                         "%s - discarding this job too." % (job_id, state.get("job")))
-                    return None, None, None, True
+                    return None, None, None, True, None
                 reg = str(state.get("id") or "").strip() or None
                 method = str(state.get("method") or "").strip() or None
                 param = str(state.get("param") or "").strip() or None
+                cal = str(state.get("calibration") or "").strip() or None
                 log("Batch prompt: job %s reusing the batch answer from job %s "
                     "(reg=%r%s)." % (job_id, state.get("job"), reg or "",
                                      "" if reg else " - leader gave no number, "
                                      "whole batch proceeds without one"))
-                return reg, method, param, False
+                return reg, method, param, False, cal
             if status == "prompting" and time.time() <= started + stale_after:
                 # The leader's dialog is on screen; wait for its answer.
                 if time.time() >= deadline:
@@ -618,27 +620,28 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
                         if state.get("cancel"):
                             log("Batch prompt: job %s follows the batch CANCEL "
                                 "from job %s." % (job_id, state.get("job")))
-                            return None, None, None, True
+                            return None, None, None, True, None
                         reg = str(state.get("id") or "").strip() or None
                         method = str(state.get("method") or "").strip() or None
                         param = str(state.get("param") or "").strip() or None
+                        cal = str(state.get("calibration") or "").strip() or None
                         log("Batch prompt: job %s reusing the batch answer from "
                             "job %s (reg=%r)." % (job_id, state.get("job"), reg or ""))
-                        return reg, method, param, False
+                        return reg, method, param, False, cal
                 started = time.time()
                 _write_batch_state(state_path, {
                     "status": "prompting", "job": job_id, "started": started})
                 log("Batch prompt: job %s is the batch leader - showing one "
                     "dialog for the whole batch." % job_id)
-                reg, method, param, cancelled = show_registration_prompt(
+                reg, method, param, cancelled, cal = show_registration_prompt(
                     config, printer_cfg, user_name, job_id, doc_name,
                     batch_note=True)
                 _write_batch_state(state_path, {
                     "status": "done", "job": job_id, "started": started,
                     "answered": time.time(),
                     "id": reg or "", "method": method or "", "param": param or "",
-                    "cancel": bool(cancelled)})
-                return reg, method, param, cancelled
+                    "calibration": cal or "", "cancel": bool(cancelled)})
+                return reg, method, param, cancelled, cal
             finally:
                 try:
                     os.remove(lock_path)
@@ -649,7 +652,7 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
         time.sleep(0.5)
     log("Batch prompt: job %s gave up waiting for the batch leader; continuing "
         "without a prompted number." % job_id)
-    return None, None, None, False
+    return None, None, None, False, None
 
 
 def get_registration_id(config, printer_cfg, printer_name, user_name, job_id,
@@ -674,21 +677,21 @@ def get_registration_id(config, printer_cfg, printer_name, user_name, job_id,
     if pending and once:
         consume_pending_id(user_name)
         log("Using pre-set registration id %r (prompt skipped)." % pending)
-        return pending, None, None, False
+        return pending, None, None, False, None
 
-    reg_id, method, param, cancelled = None, None, None, False
+    reg_id, method, param, cancelled, calibration = None, None, None, False, None
     if config.get("prompt_registration", True):
         if config.get("prompt_batch", True):
-            reg_id, method, param, cancelled = prompt_with_batching(
+            reg_id, method, param, cancelled, calibration = prompt_with_batching(
                 config, printer_cfg, printer_name, user_name, job_id, doc_name)
         else:
-            reg_id, method, param, cancelled = show_registration_prompt(
+            reg_id, method, param, cancelled, calibration = show_registration_prompt(
                 config, printer_cfg, user_name, job_id, doc_name)
     if cancelled:
-        return None, None, None, True  # explicit cancel beats any sticky fallback
+        return None, None, None, True, None  # explicit cancel beats any sticky fallback
     if not reg_id and pending:
         reg_id = pending  # sticky fallback (left in place, applies again next time)
-    return reg_id, method, param, False
+    return reg_id, method, param, False, calibration
 
 
 def sanitize_filename(name, default="document"):
@@ -1097,7 +1100,7 @@ def main():
         # back to any value pre-set via set-id/print-register. Hub printers also
         # get a test back. STRICT dialog: an explicit Cancel discards the job
         # entirely - nothing is converted, uploaded, or preserved.
-        reg_id, test_method, test_parameter, cancelled = get_registration_id(
+        reg_id, test_method, test_parameter, cancelled, calibration = get_registration_id(
             config, printer_cfg, printer_name, user_name, job_id, doc_name)
         if cancelled:
             try:
@@ -1153,6 +1156,7 @@ def main():
             ef[reg_field] = reg_id or ""
             ef["test_method"] = test_method or ""
             ef["test_parameter"] = test_parameter or ""
+            ef["calibration"] = calibration or ""
             ef["device_name"] = str(printer_cfg.get("device_name") or "")
             ef["department_name"] = str(printer_cfg.get("department_name") or "")
             ef["equipment_name"] = str(printer_cfg.get("equipment_name") or "")
