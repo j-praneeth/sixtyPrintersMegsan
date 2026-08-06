@@ -137,11 +137,11 @@ def _lcms_sample_set(text):
     # OCR dropped the underscores; the header is COLUMNAR so the value is not on the
     # same line as its "Batch File" label anyway.
     for ln in text.splitlines():
-        m = re.search(r"([0-9][0-9A-Za-z _]*?\.lcb)", ln, re.I)
+        m = re.search(r"([A-Za-z0-9][0-9A-Za-z _]*?\.lcb)", ln, re.I)
         if m:
             return _normalize(m.group(1))
     # Same-line "Batch File : <value>" fallback (rare — non-columnar reports).
-    m = re.search(r"Batch\s*File\s*[:\-]\s*([0-9][0-9A-Za-z _]*?)(?:\r?\n|$)", text, re.I)
+    m = re.search(r"Batch\s*File\s*[:\-]\s*([A-Za-z0-9][0-9A-Za-z _]*?)(?:\r?\n|$)", text, re.I)
     if m and m.group(1).strip():
         return _normalize(m.group(1))
     # Last resort: the "...$BatchAnalysis$00922_26_ML..." data path header.
