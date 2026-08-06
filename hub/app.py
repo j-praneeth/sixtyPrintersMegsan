@@ -818,6 +818,33 @@ def _rest_headers(key):
     return {"apikey": key, "Authorization": "Bearer " + key}
 
 
+async def _upsert_device_in_supabase(device_name: str, created_at: str, password: str = ""):
+    url = CONFIG["supabase_url"].rstrip("/")
+    key = get_service_key()
+    if password:
+        r = await HTTP_CLIENT.post(
+            url + "/rest/v1/rpc/set_device_password",
+            headers=_rest_headers(key),
+            json={"_device_name": device_name, "_password": password})
+        r.raise_for_status()
+    else:
+        headers = {**_rest_headers(key), "Prefer": "resolution=merge-duplicates,return=minimal"}
+        r = await HTTP_CLIENT.post(
+            url + "/rest/v1/printer_devices",
+            headers=headers,
+            json={"device_name": device_name, "created_at": created_at, "updated_at": created_at})
+        r.raise_for_status()
+
+
+async def _delete_device_from_supabase(device_name: str):
+    url = CONFIG["supabase_url"].rstrip("/")
+    key = get_service_key()
+    r = await HTTP_CLIENT.delete(
+        url + "/rest/v1/printer_devices?device_name=eq." + device_name,
+        headers=_rest_headers(key))
+    r.raise_for_status()
+
+
 async def _sb_get(url, key, path):
     """GET a PostgREST collection; raise a helpful error on non-2xx / non-list."""
     r = await HTTP_CLIENT.get(url + "/rest/v1/" + path, headers=_rest_headers(key))
@@ -1342,11 +1369,11 @@ async def enroll_device(request: Request, x_enroll_key: str = Header(default="")
     # Store the per-device PDF password in Supabase (encrypted at rest) so the
     # LIMS can reveal it. Best-effort: enrollment still succeeds if Supabase is
     # unreachable (the client keeps the password locally for encryption).
-    if password and supabase_configured():
+    if supabase_configured():
         try:
-            await _set_device_password_remote(name, password)
+            await _upsert_device_in_supabase(name, created, password)
         except Exception as exc:
-            log.warning("enroll %s: could not store PDF password in Supabase: %s", name, exc)
+            log.warning("enroll %s: could not store device in Supabase printer_devices: %s", name, exc)
 
     ingest_url = str(request.base_url).rstrip("/") + "/ingest/" + token
     return JSONResponse(status_code=201, content={
@@ -1382,8 +1409,15 @@ async def api_devices(request: Request, x_admin_token: str = Header(default=""))
 @app.delete("/api/devices/{device_id}")
 async def api_delete_device(device_id: int, x_admin_token: str = Header(default="")):
     require_admin(x_admin_token)
-    # Revokes the token: the device row is removed, its documents remain.
+    row = await run_db(lambda c: c.execute(
+        "SELECT device_name FROM devices WHERE id = ?", (device_id,)).fetchone())
     await run_db(lambda c: c.execute("DELETE FROM devices WHERE id = ?", (device_id,)))
+    if row and supabase_configured():
+        try:
+            await _delete_device_from_supabase(row["device_name"])
+        except Exception as exc:
+            log.warning("revoke %s: could not remove from Supabase printer_devices: %s",
+                        row["device_name"], exc)
     return {"ok": True}
 
 

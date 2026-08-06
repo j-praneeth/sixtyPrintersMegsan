@@ -49,6 +49,7 @@ param(
     [string]$Equipment = '',
     [string]$CatalogFile = '',
     [string]$FallbackDir = '',
+    [string]$HubUrl = '',
     [switch]$BatchNote,
     [int]$TimeoutSec = 0
 )
@@ -61,6 +62,26 @@ try {
     function Write-OutJson([string]$Json) {
         [System.IO.File]::WriteAllText($OutFile, $Json,
             (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    function Test-HubReachable {
+        if (-not $HubUrl) { return $true }
+        try {
+            $req = [System.Net.WebRequest]::Create($HubUrl.TrimEnd('/') + '/healthz')
+            $req.Timeout = 3000
+            $req.Method = 'GET'
+            $resp = $req.GetResponse()
+            $resp.Close()
+            return $true
+        } catch { return $false }
+    }
+
+    function Show-ServerUnavailable {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Server Unavailable. Please contact the IT Department.`n`nDo not click the ""Attach && Print"" button again, as your previous print request has already been queued and will automatically appear in LIMS once the server connection is restored.",
+            'Server Unavailable',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
     }
 
     # Match the hub's sanitize_segment BYTE-FOR-BYTE so the share-fallback
@@ -268,6 +289,7 @@ try {
             $ri = $cmbReg.SelectedIndex
             if ($ri -lt 0 -or $ri -ge $script:filtered.Count -or
                 $cmbMethod.SelectedIndex -lt 0 -or $cmbParam.SelectedIndex -lt 0) { return }
+            if (-not (Test-HubReachable)) { Show-ServerUnavailable; return }
             $json = (@{
                 registration_number = $script:filtered[$ri].RegNo
                 test_method         = [string]$cmbMethod.SelectedItem
@@ -336,6 +358,7 @@ try {
         $btnOk.Enabled = $false      # strict: at least a registration number is required
         $btnOk.Add_Click({
             if (-not $txtReg.Text.Trim()) { return }
+            if (-not (Test-HubReachable)) { Show-ServerUnavailable; return }
             $json = (@{
                 registration_number = $txtReg.Text.Trim()
                 test_method         = $txtMethod.Text.Trim()

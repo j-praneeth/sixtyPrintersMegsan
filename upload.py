@@ -176,6 +176,7 @@ def fetch_catalog(config, printer_cfg):
 def prompt_registration_in_user_session(out_file, doc_name, timeout_sec=180,
                                         department=None, equipment=None,
                                         catalog_file=None, fallback_dir=None,
+                                        hub_url=None,
                                         batch_note=False):
     """Pop the registration dialog on the interactive user's screen and return
     (reg_id, test_method, test_parameter, cancelled).
@@ -327,6 +328,8 @@ def prompt_registration_in_user_session(out_file, doc_name, timeout_sec=180,
                 if catalog_file and os.path.isfile(catalog_file):
                     cmdline += ' -CatalogFile "%s"' % catalog_file
                 cmdline += ' -FallbackDir "%s"' % (fallback_dir or "")
+                if hub_url:
+                    cmdline += ' -HubUrl "%s"' % hub_url.replace('"', "'")
             if batch_note:
                 cmdline += ' -BatchNote'
             # Tell the dialog to close itself shortly BEFORE we stop waiting, so
@@ -439,6 +442,15 @@ def show_registration_prompt(config, printer_cfg, user_name, job_id, doc_name,
             except Exception as exc:
                 log("Could not write catalog temp file (ignored): %s" % exc)
                 catalog_file = None
+        ingest_url = str(printer_cfg.get("url") or "").strip()
+        hub_base_url = ""
+        if ingest_url:
+            try:
+                import urllib.parse as _up
+                _p = _up.urlparse(ingest_url)
+                hub_base_url = "%s://%s" % (_p.scheme, _p.netloc)
+            except Exception:
+                pass
         try:
             return prompt_registration_in_user_session(
                 out_file, doc_name, timeout_sec=timeout,
@@ -446,6 +458,7 @@ def show_registration_prompt(config, printer_cfg, user_name, job_id, doc_name,
                 equipment=str(printer_cfg.get("equipment_name") or "").strip(),
                 catalog_file=catalog_file,
                 fallback_dir=str(config.get("catalog_share_dir") or "").strip(),
+                hub_url=hub_base_url,
                 batch_note=batch_note)
         finally:
             if catalog_file:
