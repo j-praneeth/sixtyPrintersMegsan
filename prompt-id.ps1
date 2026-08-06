@@ -172,78 +172,99 @@ try {
 
     if ($hub -and $catalogLoaded) {
         # ---- hub mode with catalog: search -> Registration -> Method -> Parameter ----
-        $form.Size = New-Object System.Drawing.Size(490, 410)
+        $form.Size = New-Object System.Drawing.Size(490, 464)
         $lbl.Size = New-Object System.Drawing.Size(450, 40)
         $form.Controls.Add($lbl)
 
+        # Calibration field
+        $lblCalib = New-Object System.Windows.Forms.Label
+        $lblCalib.Text = 'Calibration:'
+        $lblCalib.Location = New-Object System.Drawing.Point(15, 56)
+        $lblCalib.Size = New-Object System.Drawing.Size(450, 18)
+        $form.Controls.Add($lblCalib)
+
+        $cmbCalib = New-Object System.Windows.Forms.ComboBox
+        $cmbCalib.Location = New-Object System.Drawing.Point(15, 76)
+        $cmbCalib.Size = New-Object System.Drawing.Size(200, 25)
+        $cmbCalib.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        [void]$cmbCalib.Items.Add('None')
+        [void]$cmbCalib.Items.Add('Yes')
+        $cmbCalib.SelectedIndex = 0
+        $form.Controls.Add($cmbCalib)
+
+        # Registration / test fields (shifted down 54px)
         $lblSearch = New-Object System.Windows.Forms.Label
         $lblSearch.Text = 'Search registration:'
-        $lblSearch.Location = New-Object System.Drawing.Point(15, 56)
+        $lblSearch.Location = New-Object System.Drawing.Point(15, 110)
         $lblSearch.Size = New-Object System.Drawing.Size(450, 18)
         $form.Controls.Add($lblSearch)
 
         $txtSearch = New-Object System.Windows.Forms.TextBox
-        $txtSearch.Location = New-Object System.Drawing.Point(15, 76)
+        $txtSearch.Location = New-Object System.Drawing.Point(15, 130)
         $txtSearch.Size = New-Object System.Drawing.Size(445, 25)
         $form.Controls.Add($txtSearch)
 
         $lblReg = New-Object System.Windows.Forms.Label
         $lblReg.Text = 'Registration number:'
-        $lblReg.Location = New-Object System.Drawing.Point(15, 108)
+        $lblReg.Location = New-Object System.Drawing.Point(15, 162)
         $lblReg.Size = New-Object System.Drawing.Size(450, 18)
         $form.Controls.Add($lblReg)
 
         $cmbReg = New-Object System.Windows.Forms.ComboBox
-        $cmbReg.Location = New-Object System.Drawing.Point(15, 128)
+        $cmbReg.Location = New-Object System.Drawing.Point(15, 182)
         $cmbReg.Size = New-Object System.Drawing.Size(445, 25)
         $cmbReg.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
         $form.Controls.Add($cmbReg)
 
         $lblMethod = New-Object System.Windows.Forms.Label
         $lblMethod.Text = 'Test method:'
-        $lblMethod.Location = New-Object System.Drawing.Point(15, 162)
+        $lblMethod.Location = New-Object System.Drawing.Point(15, 216)
         $lblMethod.Size = New-Object System.Drawing.Size(450, 18)
         $form.Controls.Add($lblMethod)
 
         $cmbMethod = New-Object System.Windows.Forms.ComboBox
-        $cmbMethod.Location = New-Object System.Drawing.Point(15, 182)
+        $cmbMethod.Location = New-Object System.Drawing.Point(15, 236)
         $cmbMethod.Size = New-Object System.Drawing.Size(445, 25)
         $cmbMethod.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
         $form.Controls.Add($cmbMethod)
 
         $lblParam = New-Object System.Windows.Forms.Label
         $lblParam.Text = 'Test parameter:'
-        $lblParam.Location = New-Object System.Drawing.Point(15, 216)
+        $lblParam.Location = New-Object System.Drawing.Point(15, 270)
         $lblParam.Size = New-Object System.Drawing.Size(450, 18)
         $form.Controls.Add($lblParam)
 
         $cmbParam = New-Object System.Windows.Forms.ComboBox
-        $cmbParam.Location = New-Object System.Drawing.Point(15, 236)
+        $cmbParam.Location = New-Object System.Drawing.Point(15, 290)
         $cmbParam.Size = New-Object System.Drawing.Size(445, 25)
         $cmbParam.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
         $form.Controls.Add($cmbParam)
 
         $btnOk = New-Object System.Windows.Forms.Button
         $btnOk.Text = 'Attach && print'
-        $btnOk.Location = New-Object System.Drawing.Point(130, 300)
+        $btnOk.Location = New-Object System.Drawing.Point(130, 354)
         $btnOk.Size = New-Object System.Drawing.Size(125, 30)
-        $btnOk.Enabled = $false      # all three dropdowns must have a selection
+        $btnOk.Enabled = $false
         $form.Controls.Add($btnOk)
         $form.AcceptButton = $btnOk
 
         $btnCancel = New-Object System.Windows.Forms.Button
         $btnCancel.Text = 'Cancel'
-        $btnCancel.Location = New-Object System.Drawing.Point(265, 300)
+        $btnCancel.Location = New-Object System.Drawing.Point(265, 354)
         $btnCancel.Size = New-Object System.Drawing.Size(90, 30)
-        $btnCancel.Add_Click({ $form.Close() })   # cancel JSON written after ShowDialog
+        $btnCancel.Add_Click({ $form.Close() })
         $form.Controls.Add($btnCancel)
 
         # $script:filtered[i] corresponds 1:1 to $cmbReg.Items[i].
         $script:filtered = @()
         $updateOk = {
-            $btnOk.Enabled = ($cmbReg.SelectedIndex -ge 0 -and
-                              $cmbMethod.SelectedIndex -ge 0 -and
-                              $cmbParam.SelectedIndex -ge 0)
+            if ($cmbCalib.SelectedItem -eq 'Yes') {
+                $btnOk.Enabled = $true
+            } else {
+                $btnOk.Enabled = ($cmbReg.SelectedIndex -ge 0 -and
+                                  $cmbMethod.SelectedIndex -ge 0 -and
+                                  $cmbParam.SelectedIndex -ge 0)
+            }
         }
         $refreshParams = {
             $cmbParam.Items.Clear()
@@ -252,7 +273,7 @@ try {
             if ($ri -ge 0 -and $ri -lt $script:filtered.Count -and $mi -ge 0) {
                 $m = $script:filtered[$ri].Methods[$mi]
                 foreach ($p in $m.Parameters) { [void]$cmbParam.Items.Add($p) }
-                if ($cmbParam.Items.Count -eq 1) { $cmbParam.SelectedIndex = 0 }  # only one -> auto-pick
+                if ($cmbParam.Items.Count -eq 1) { $cmbParam.SelectedIndex = 0 }
             }
             & $updateOk
         }
@@ -262,12 +283,11 @@ try {
             $ri = $cmbReg.SelectedIndex
             if ($ri -ge 0 -and $ri -lt $script:filtered.Count) {
                 foreach ($m in $script:filtered[$ri].Methods) { [void]$cmbMethod.Items.Add($m.Method) }
-                if ($cmbMethod.Items.Count -eq 1) { $cmbMethod.SelectedIndex = 0 }  # only one -> auto-pick
+                if ($cmbMethod.Items.Count -eq 1) { $cmbMethod.SelectedIndex = 0 }
             }
             & $refreshParams
         }
         $refreshRegs = {
-            # Plain substring match on reg_no (no wildcard surprises).
             $q = $txtSearch.Text.Trim()
             $script:filtered = @($script:regs | Where-Object {
                 (-not $q) -or
@@ -280,21 +300,41 @@ try {
             $cmbReg.SelectedIndex = $(if ($script:filtered.Count -eq 1) { 0 } else { -1 })
             & $refreshMethods
         }
+
+        # Show/hide registration fields based on Calibration selection
+        $calibFields = @($lblSearch, $txtSearch, $lblReg, $cmbReg, $lblMethod, $cmbMethod, $lblParam, $cmbParam)
+        $cmbCalib.Add_SelectedIndexChanged({
+            $isCalib = ($cmbCalib.SelectedItem -eq 'Yes')
+            foreach ($ctrl in $calibFields) { $ctrl.Visible = -not $isCalib }
+            & $updateOk
+        })
+
         $txtSearch.Add_TextChanged($refreshRegs)
         $cmbReg.Add_SelectedIndexChanged($refreshMethods)
         $cmbMethod.Add_SelectedIndexChanged($refreshParams)
         $cmbParam.Add_SelectedIndexChanged($updateOk)
 
         $btnOk.Add_Click({
-            $ri = $cmbReg.SelectedIndex
-            if ($ri -lt 0 -or $ri -ge $script:filtered.Count -or
-                $cmbMethod.SelectedIndex -lt 0 -or $cmbParam.SelectedIndex -lt 0) { return }
             if (-not (Test-HubReachable)) { Show-ServerUnavailable; return }
-            $json = (@{
-                registration_number = $script:filtered[$ri].RegNo
-                test_method         = [string]$cmbMethod.SelectedItem
-                test_parameter      = [string]$cmbParam.SelectedItem
-            } | ConvertTo-Json -Compress)
+            $isCalib = ($cmbCalib.SelectedItem -eq 'Yes')
+            if ($isCalib) {
+                $json = (@{
+                    registration_number = ''
+                    test_method         = ''
+                    test_parameter      = ''
+                    calibration         = 'Yes'
+                } | ConvertTo-Json -Compress)
+            } else {
+                $ri = $cmbReg.SelectedIndex
+                if ($ri -lt 0 -or $ri -ge $script:filtered.Count -or
+                    $cmbMethod.SelectedIndex -lt 0 -or $cmbParam.SelectedIndex -lt 0) { return }
+                $json = (@{
+                    registration_number = $script:filtered[$ri].RegNo
+                    test_method         = [string]$cmbMethod.SelectedItem
+                    test_parameter      = [string]$cmbParam.SelectedItem
+                    calibration         = 'None'
+                } | ConvertTo-Json -Compress)
+            }
             Write-OutJson $json
             $script:answered = $true
             $form.Close()
