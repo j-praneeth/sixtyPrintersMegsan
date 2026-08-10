@@ -39,6 +39,11 @@ import urllib.parse
 import urllib.error
 from datetime import datetime
 
+# Captured once at process start; used by prompt_with_batching to detect
+# whether this job was launched as part of the same print burst as the
+# batch leader (same-burst = _PROCESS_START <= leader.started + burst_window).
+_PROCESS_START = time.time()
+
 # --------------------------------------------------------------------------- #
 # Paths (everything lives next to this file, in %ProgramData%\VirtualCloudPrinter)
 # --------------------------------------------------------------------------- #
@@ -556,13 +561,19 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
     answer. Returns (reg_id, test_method, test_parameter, cancelled) exactly like
     show_registration_prompt; a leader's Cancel cancels every follower too."""
     state_path, lock_path = _batch_paths(user_name, printer_name)
-    # Post-answer join window: only jobs from the SAME burst (launched moments
-    # after the leader's dialog was answered) may reuse the answer; anything
-    # later is a new print and must re-prompt.
+    # Post-answer join window: jobs that are still in GS conversion when the
+    # leader answers are detected via _PROCESS_START (captured at process launch)
+    # vs the leader's start time.  Any upload.py launched within burst_window
+    # seconds of the leader is considered the same print burst; anything later
+    # is a new independent print and must re-prompt.
     try:
         grace = float(config.get("prompt_batch_grace_seconds", 1))
     except Exception:
         grace = 1.0
+    try:
+        burst_window = float(config.get("prompt_batch_burst_seconds", 30))
+    except Exception:
+        burst_window = 30.0
     try:
         timeout = float(config.get("prompt_timeout_seconds", 180))
     except Exception:
@@ -585,15 +596,16 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
             except Exception:
                 answered = 0.0
             status = str(state.get("status") or "")
-            # A follower may reuse the answer if it arrives quickly after the
-            # leader answered (grace window), OR if it is a slow GS job that
-            # finished conversion after the grace window but is still within the
-            # batch session (started within stale_after seconds of the leader).
-            # The second condition covers large batches (200+ files) where CPU
-            # contention means some GS conversions complete well after the user
-            # clicked OK.
+            # A follower may reuse the answer if:
+            #   1. It arrives quickly after the answer (grace window, default 1s)
+            #      — covers fast followers already in the polling loop.
+            #   2. THIS process was launched within burst_window seconds of the
+            #      leader (default 30s) — covers slow GS jobs in a large batch
+            #      whose conversion finishes after the grace window expires.
+            #      _PROCESS_START is captured once at module import time, so it
+            #      reflects when mfilemon actually launched this upload.py.
             _same_burst = (answered and time.time() <= answered + grace) or \
-                          (started and time.time() <= started + stale_after)
+                          (started and _PROCESS_START <= started + burst_window)
             if status == "done" and _same_burst:
                 if state.get("cancel"):
                     log("Batch prompt: job %s follows the batch CANCEL from job "
@@ -630,7 +642,7 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
                     except Exception:
                         _dc_started = 0.0
                     _dc_same_burst = (answered and time.time() <= answered + grace) or \
-                                     (_dc_started and time.time() <= _dc_started + stale_after)
+                                     (_dc_started and _PROCESS_START <= _dc_started + burst_window)
                     if _dc_same_burst:
                         if state.get("cancel"):
                             log("Batch prompt: job %s follows the batch CANCEL "
