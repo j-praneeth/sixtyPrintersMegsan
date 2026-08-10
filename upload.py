@@ -585,7 +585,16 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
             except Exception:
                 answered = 0.0
             status = str(state.get("status") or "")
-            if status == "done" and answered and time.time() <= answered + grace:
+            # A follower may reuse the answer if it arrives quickly after the
+            # leader answered (grace window), OR if it is a slow GS job that
+            # finished conversion after the grace window but is still within the
+            # batch session (started within stale_after seconds of the leader).
+            # The second condition covers large batches (200+ files) where CPU
+            # contention means some GS conversions complete well after the user
+            # clicked OK.
+            _same_burst = (answered and time.time() <= answered + grace) or \
+                          (started and time.time() <= started + stale_after)
+            if status == "done" and _same_burst:
                 if state.get("cancel"):
                     log("Batch prompt: job %s follows the batch CANCEL from job "
                         "%s - discarding this job too." % (job_id, state.get("job")))
@@ -616,7 +625,13 @@ def prompt_with_batching(config, printer_cfg, printer_name, user_name, job_id,
                         answered = float(state.get("answered") or 0)
                     except Exception:
                         answered = 0.0
-                    if answered and time.time() <= answered + grace:
+                    try:
+                        _dc_started = float(state.get("started") or 0)
+                    except Exception:
+                        _dc_started = 0.0
+                    _dc_same_burst = (answered and time.time() <= answered + grace) or \
+                                     (_dc_started and time.time() <= _dc_started + stale_after)
+                    if _dc_same_burst:
                         if state.get("cancel"):
                             log("Batch prompt: job %s follows the batch CANCEL "
                                 "from job %s." % (job_id, state.get("job")))
