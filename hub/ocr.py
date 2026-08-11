@@ -152,7 +152,8 @@ def _lcms_sample_set(text):
 def _icpms_sample_set(text):
     # Return the ENTIRE Batch Folder segment after the month:
     # '.../2025/Jul/08765_25_MV_01_00(2025-07-21_17-20-30).b'.
-    m = re.search(r"/(?:%s)[a-z.]*/\s*([^/\r\n]+)" % _MONTHS, text, re.I)
+    # Require .b suffix so date fields like 'DD/Aug/2026 18:55:28' are not captured.
+    m = re.search(r"/(?:%s)[a-z.]*/\s*([^/\r\n]+\.b)" % _MONTHS, text, re.I)
     if not m:
         return None
     return _normalize(m.group(1))
