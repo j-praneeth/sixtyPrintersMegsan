@@ -133,11 +133,10 @@ def _normalize(value):
 
 def _lcms_sample_set(text):
     # Return the ENTIRE Shimadzu Batch File value (e.g. 00922_26_BA_CT_NNU_00.lcb).
-    # Match the value's own shape (ends in .lcb), per line, tolerating spaces where
-    # OCR dropped the underscores; the header is COLUMNAR so the value is not on the
-    # same line as its "Batch File" label anyway.
+    # Matches .lcb (LCMS) and .gcb (GCMS) batch file extensions.
+    # Match per line, tolerating spaces where OCR dropped underscores.
     for ln in text.splitlines():
-        m = re.search(r"([A-Za-z0-9][0-9A-Za-z _]*?\.lcb)", ln, re.I)
+        m = re.search(r"([A-Za-z0-9][0-9A-Za-z _]*?\.(?:lcb|gcb))", ln, re.I)
         if m:
             return _normalize(m.group(1))
     # Same-line "Batch File : <value>" fallback (rare — non-columnar reports).
@@ -218,13 +217,31 @@ def _reg_no(text):
 
 
 def _xrd_title(text):
-    """The prominent XRD sample title line, e.g.
-    '00649_26_ML_Empagliflozin Film Coated Tablets 25 mg _MP-1' — a line beginning
-    with <digits>_<digits>_ML_. Returned verbatim (only inner whitespace tidied)."""
+    """Primary: digit-prefixed sample number line (e.g. '01150_26_ML_Albendazole…').
+    Strips trailing OCR artifacts like '(26404) #1' (Rigaku internal doc IDs)
+    so the same sample always maps to the same folder regardless of print day.
+    Normalized with _normalize so space/underscore variants produce the same key.
+    Fallback: calibration standard title — looks only in the first 20 lines for
+    any short line with an underscore that is not a file path or metadata label
+    (e.g. 'SRM 1976b_10 Aug 2026')."""
     for raw in text.splitlines():
         line = raw.strip()
         if re.match(r"^\d{3,}[_ ]\d{2}[_ ]ML[_ ]", line, re.I):
-            return re.sub(r"\s{2,}", " ", line)
+            # Strip trailing printer/Rigaku artifacts like " (26404)" or " #1"
+            clean = re.sub(r"\s*\(\d{3,}\)\s*(?:#\d+\s*)?$", "", line).strip()
+            clean = re.sub(r"\s*#\d+\s*$", "", clean).strip()
+            return _normalize(re.sub(r"\s{2,}", " ", clean))
+    # Fallback for calibration standards — only scan first 20 lines to avoid
+    # matching unrelated metadata that happens to contain underscores.
+    first_lines = text.splitlines()[:20]
+    for raw in first_lines:
+        line = raw.strip()
+        if ("_" in line and 4 < len(line) < 80
+                and ":" not in line
+                and not re.search(
+                    r"[:\\]|Equipment|Printed|Page\s*No|Analysed|Processed|Checked|Date\b",
+                    line, re.I)):
+            return _normalize(re.sub(r"\s{2,}", " ", line))
     return None
 
 
