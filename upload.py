@@ -1110,6 +1110,46 @@ def main():
             if printer_cfg is not None:
                 log("Printer %r matched a config entry after normalization." % printer_name)
         if printer_cfg is None:
+            # %r arrives FILENAME-SANITIZED by the port monitor: a printer named
+            # "ML/LCMS-10/0946" is delivered as "ML-LCMS-10-0946", because '/' (and
+            # the other characters Windows forbids in a file name) cannot appear in
+            # the spool file name the monitor builds. The config key is the REAL
+            # printer name, so an exact/casefold lookup misses and the job dies
+            # before the prompt. Compare the same sanitized form of each key.
+            sanitized = {}
+            for k, v in printers.items():
+                sk = str(k)
+                for ch in '<>:"/\\|?*':
+                    sk = sk.replace(ch, "-")
+                sanitized.setdefault(sk.strip().casefold(), v)
+            printer_cfg = sanitized.get((printer_name or "").strip().casefold())
+            if printer_cfg is not None:
+                log("Printer %r matched a config entry after filename "
+                    "sanitization (the real printer name contains a character "
+                    "the port monitor cannot put in a file name)." % printer_name)
+        if printer_cfg is None:
+            # Last resort for a monitor that substitutes some OTHER character than
+            # '-'. Strip every separator from both sides and match on what is left.
+            # Only accepted when EXACTLY ONE key matches, so a job is never
+            # silently mis-routed to the wrong printer/hub device.
+            def _loose(s):
+                out = []
+                for ch in str(s):
+                    if ch not in '<>:"/\\|?*-_ .':
+                        out.append(ch)
+                return "".join(out).casefold()
+
+            want = _loose(printer_name)
+            hits = [(k, v) for k, v in printers.items() if _loose(k) == want]
+            if len(hits) == 1:
+                printer_cfg = hits[0][1]
+                log("Printer %r matched config entry %r on a loose "
+                    "(separator-insensitive) comparison." % (printer_name, hits[0][0]))
+            elif len(hits) > 1:
+                log("Printer %r loosely matches %d config entries (%s) - refusing "
+                    "to guess; fix the printer name or the config key."
+                    % (printer_name, len(hits), ", ".join(k for k, _ in hits)))
+        if printer_cfg is None:
             # Fall back to a default URL if the printer is not explicitly listed.
             default_url = config.get("default_url", "").strip()
             if default_url:
