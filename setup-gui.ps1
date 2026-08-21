@@ -155,8 +155,22 @@ $cmbDept.BackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
 # Catalog share folder is not collected: the dropdowns come from the hub /catalog
 # fetch and there is no limsDocs SMB share to fall back to (Supabase-only).
 
-# equipment name -> its department (populated when the equipment list loads).
+# The dropdown shows "name  [equipment_id]" so equipment sharing a name can be
+# told apart, but the hub only ever wants the bare name. These two maps go from
+# the DISPLAYED text back to the real name and to the department.
+# display text -> its department (populated when the equipment list loads).
 $script:equipDeptMap = @{}
+# display text -> the bare equipment name to send to setup.ps1.
+$script:equipNameMap = @{}
+# The real equipment name for whatever is currently selected (falls back to the
+# displayed text if the map somehow misses, so behaviour never regresses).
+function Get-SelectedEquipment {
+    $disp = $cmbEquip.Text.Trim()
+    if ($script:equipNameMap -and $script:equipNameMap.ContainsKey($disp)) {
+        return [string]$script:equipNameMap[$disp]
+    }
+    return $disp
+}
 # Choosing an equipment auto-fills its department (fetched from the equipment table).
 $cmbEquip.Add_SelectedIndexChanged({
     $sel = $cmbEquip.Text.Trim()
@@ -234,11 +248,20 @@ $btnLoad.Add_Click({
         $eq = @(($resp.Content | ConvertFrom-Json).equipment)
         $cmbEquip.Items.Clear(); $cmbDept.Text = ''
         $script:equipDeptMap = @{}
+        $script:equipNameMap = @{}
         foreach ($e in $eq) {
             $nm = [string]$e.name; $dn = [string]$e.department
             if (-not $nm) { continue }
-            [void]$cmbEquip.Items.Add($nm)
-            $script:equipDeptMap[$nm] = $dn
+            # Show the equipment_id beside the name so duplicates are
+            # distinguishable; older hubs omit it, then the name shows alone.
+            $eid = [string]$e.equipment_id
+            $disp = if ($eid.Trim()) { "$nm  [$($eid.Trim())]" } else { $nm }
+            # A duplicate DISPLAY text (same name AND same id) would make the
+            # maps ambiguous, so keep only the first.
+            if ($script:equipNameMap.ContainsKey($disp)) { continue }
+            [void]$cmbEquip.Items.Add($disp)
+            $script:equipDeptMap[$disp] = $dn
+            $script:equipNameMap[$disp] = $nm
         }
         if ($cmbEquip.Items.Count) { $cmbEquip.SelectedIndex = 0 }   # auto-fills department
         $lblConn.ForeColor = [System.Drawing.Color]::Green
@@ -280,7 +303,7 @@ function Build-Args {
         # the hub /catalog fetch is the source of the dropdowns). setup.ps1 no longer
         # prompts for it either, so omitting the flag is safe.
         $a += @('-HubUrl', $txtHub.Text.Trim(), '-DeviceName', $txtDev.Text.Trim(),
-                '-Department', $cmbDept.Text.Trim(), '-Equipment', $cmbEquip.Text.Trim(),
+                '-Department', $cmbDept.Text.Trim(), '-Equipment', (Get-SelectedEquipment),
                 '-EnrollKey', $txtKey.Text.Trim())
         $a += @('-NoPassword')  # this wizard never sets a per-printer PDF password
     } else {
@@ -346,7 +369,7 @@ function Start-Install {
             Assert-Clean $txtHub.Text 'The hub URL'
             Assert-Clean $txtKey.Text 'The enroll key'
             Assert-Clean $cmbDept.Text 'The department'
-            Assert-Clean $cmbEquip.Text 'The equipment'
+            Assert-Clean (Get-SelectedEquipment) 'The equipment'
         }
     } catch { return }
     $quoted = Quote-Args (Build-Args)

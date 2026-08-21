@@ -466,6 +466,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS equipment_master (
                 equipment_name  TEXT,
                 department_name TEXT,
+                equipment_id    TEXT,
                 UNIQUE (equipment_name, department_name)
             );
             -- Each printed PDF. Mirrors the Supabase printer_documents columns
@@ -516,6 +517,7 @@ def init_db():
                 if col not in have:
                     conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, typ))
         _ensure_cols("devices", [("department_name", "TEXT"), ("equipment_name", "TEXT")])
+        _ensure_cols("equipment_master", [("equipment_id", "TEXT")])
         _ensure_cols("documents", [
             ("department_name", "TEXT"), ("equipment_name", "TEXT"),
             ("registration_number", "TEXT"), ("test_method", "TEXT"),
@@ -863,6 +865,32 @@ async def _sb_get(url, key, path):
     return data
 
 
+# Candidate column names for the human-facing equipment identifier, in priority
+# order. The upstream `equipment` table is fetched with select=* so whichever of
+# these it actually has is picked up without needing a schema change here. The
+# `id` primary key is deliberately LAST (a bare UUID is useless to a human, but
+# better than showing nothing when no friendlier code exists).
+_EQUIP_ID_KEYS = ("equipment_id", "equipment_code", "equipment_no",
+                  "equipment_number", "instrument_id", "instrument_code",
+                  "asset_id", "asset_no", "asset_number", "code", "id")
+
+
+def _equip_ident(row):
+    """The identifier to show beside an equipment name in the installer dropdown.
+    Returns '' when the row carries nothing usable (dropdown then shows just the
+    name, exactly as before)."""
+    for k in _EQUIP_ID_KEYS:
+        v = row.get(k)
+        if v is None:
+            continue
+        s = str(v).strip()
+        # A UUID-shaped `id` is noise unless it is all we have; the loop order
+        # already prefers the friendlier codes, so accept whatever comes first.
+        if s:
+            return s
+    return ""
+
+
 async def _refresh_from_supabase(url, key, version):
     """Rebuild the local catalog DIRECTLY from the source tables (no printer_data
     projection): the `equipment` master (name + its department, decoded via
@@ -877,15 +905,18 @@ async def _refresh_from_supabase(url, key, version):
     dept_name = {d.get("id"): (d.get("name") or "").strip()
                  for d in departments if d.get("id")}
 
+    # select=* so the human-facing equipment identifier comes across whatever it
+    # is called upstream (the installer shows it next to the name to tell apart
+    # equipment that share a name). _equip_ident picks the first candidate present.
     equipment = await _sb_get(
-        url, key, "equipment?select=name,department_id&is_latest=eq.true&" + LIM)
+        url, key, "equipment?select=*&is_latest=eq.true&" + LIM)
     equip_rows, seen_eq = [], set()
     for e in equipment:
         nm = (e.get("name") or "").strip()
         dn = dept_name.get(e.get("department_id"))
         if nm and dn and (nm, dn) not in seen_eq:
             seen_eq.add((nm, dn))
-            equip_rows.append((nm, dn))
+            equip_rows.append((nm, dn, _equip_ident(e)))
 
     tparams = await _sb_get(url, key, "test_parameters?select=id,test_name&" + LIM)
     param_name = {t.get("id"): (t.get("test_name") or "").strip()
@@ -926,9 +957,10 @@ async def _refresh_from_supabase(url, key, version):
                 "department_name, equipment_name, status, test_method, test_parameter) "
                 "VALUES (?, ?, '', 'open', ?, ?)", (reg_no, dn, method, pn))
         conn.execute("DELETE FROM equipment_master")
-        for (nm, dn) in equip_rows:
+        for (nm, dn, eid) in equip_rows:
             conn.execute("INSERT OR IGNORE INTO equipment_master "
-                         "(equipment_name, department_name) VALUES (?, ?)", (nm, dn))
+                         "(equipment_name, department_name, equipment_id) "
+                         "VALUES (?, ?, ?)", (nm, dn, eid))
         if version is not None:
             set_meta(conn, "pd_version", str(version))
 
@@ -1313,19 +1345,24 @@ async def list_departments(x_enroll_key: str = Header(default="")):
 async def list_equipment(department: str = "", x_enroll_key: str = Header(default="")):
     """Equipment names from the `equipment` master, each WITH its department, so the
     installer can auto-fill the department when an equipment is chosen. Optionally
-    scoped to a department. Response items are {name, department}."""
+    scoped to a department. Response items are {name, department, equipment_id} —
+    the id lets the installer tell apart equipment that share a name (may be '')."""
     require_enroll(x_enroll_key)
     if department:
         rows = await run_db(lambda c: c.execute(
-            "SELECT DISTINCT equipment_name, department_name FROM equipment_master "
+            "SELECT DISTINCT equipment_name, department_name, equipment_id "
+            "FROM equipment_master "
             "WHERE department_name = ? AND equipment_name <> '' "
             "ORDER BY equipment_name", (department,)).fetchall())
     else:
         rows = await run_db(lambda c: c.execute(
-            "SELECT DISTINCT equipment_name, department_name FROM equipment_master "
+            "SELECT DISTINCT equipment_name, department_name, equipment_id "
+            "FROM equipment_master "
             "WHERE equipment_name <> '' ORDER BY equipment_name").fetchall())
     return {"equipment": [{"name": r["equipment_name"],
-                           "department": r["department_name"]} for r in rows]}
+                           "department": r["department_name"],
+                           "equipment_id": r["equipment_id"] or ""}
+                          for r in rows]}
 
 
 async def _set_device_password_remote(device_name, password):
