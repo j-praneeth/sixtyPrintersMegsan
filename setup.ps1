@@ -76,6 +76,15 @@ $script:IsLegacyOs = ([Environment]::OSVersion.Version.Major -lt 10) -or ($env:V
 # Capability probe, not an OS sniff: Win8.x has the cmdlets and should use them.
 $script:HasPrintCmdlets = ($env:VCP_COMPAT_FORCE_LEGACY -ne '1') -and
                           [bool](Get-Command Add-Printer -ErrorAction SilentlyContinue)
+# Current Ghostscript 10.x links against UCRT/api-set entry points that do not
+# exist on early Windows 10 builds: gsdll64.dll then fails to load with
+# ERROR_MOD_NOT_FOUND (126) and EVERY print dies at the PS->PDF step. The same
+# cutoff blocks the modern VC++ redistributable, so it is not specific to
+# Ghostscript. 17763 = Win10 1809, the oldest build these still load on; older
+# builds (e.g. 16299 / 1709) get the pinned 9.56.1 instead. Win7 already did.
+$script:NeedsLegacyGs = $script:IsLegacyOs -or
+                        ([Environment]::OSVersion.Version.Major -eq 10 -and
+                         [Environment]::OSVersion.Version.Build -lt 17763)
 
 # --------------------------------------------------------------------------- #
 # Constants
@@ -605,19 +614,61 @@ function Ensure-LegacyPython {
     return $pyw
 }
 
+function Test-GsWorks {
+    # An installed Ghostscript is useless if gsdll64.dll cannot be loaded - the
+    # exe exists, resolves, and still fails every job with "Can't load
+    # Ghostscript DLL / LoadLibrary error code 126". Only a real invocation
+    # proves it: run --version and require a clean exit.
+    param([string]$Exe)
+    if (-not $Exe -or -not (Test-Path $Exe)) { return $false }
+    try {
+        $out = & $Exe '--version' 2>&1
+        if ($LASTEXITCODE -eq 0 -and "$out" -match '\d') { return $true }
+        Write-Warn2 ("Ghostscript at $Exe does not run (" + (("$out" -split "`n")[0]).Trim() + ') - ignoring it.')
+        return $false
+    } catch {
+        Write-Warn2 "Ghostscript at $Exe could not be executed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Find-GsExe {
-    # Return the newest Ghostscript console exe, choosing by NUMERIC version
-    # (so gs10.x beats gs9.x, which a plain string sort gets wrong).
+    # Return the newest WORKING Ghostscript console exe, choosing by NUMERIC
+    # version (so gs10.x beats gs9.x, which a plain string sort gets wrong).
+    # Newest-first, but each candidate must actually run: on an old Windows 10
+    # build the newest install is present yet unloadable, and silently handing
+    # that path back is what makes every print fail later.
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
         if (-not $root) { continue }
         $gsDir = Join-Path $root 'gs'
         if (-not (Test-Path $gsDir)) { continue }
-        $found = Get-ChildItem -Path $gsDir -Recurse -Filter 'gswin*c.exe' -ErrorAction SilentlyContinue |
-            Sort-Object { try { [version](($_.Directory.Parent.Name) -replace '[^0-9.]', '') } catch { [version]'0.0' } } -Descending |
-            Select-Object -First 1
-        if ($found) { return $found.FullName }
+        $candidates = Get-ChildItem -Path $gsDir -Recurse -Filter 'gswin*c.exe' -ErrorAction SilentlyContinue |
+            Sort-Object { try { [version](($_.Directory.Parent.Name) -replace '[^0-9.]', '') } catch { [version]'0.0' } } -Descending
+        foreach ($c in $candidates) {
+            if (Test-GsWorks $c.FullName) { return $c.FullName }
+        }
     }
     return $null
+}
+
+function Install-LegacyGhostscript {
+    # Install the pinned Ghostscript 9.56.1 - the last release that loads on
+    # Win7 and on early Win10 builds. Prefers an offline installer in vendor\.
+    # Returns the exe path, or $null if it still could not be installed.
+    $inst = Join-Path $env:TEMP 'gs-setup.exe'
+    $vendorGs = Get-ChildItem $VendorDir -Filter 'gs*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($vendorGs -and (Test-IsExe $vendorGs.FullName)) {
+        Write-Info "Using vendored Ghostscript installer: $($vendorGs.Name)"
+        Copy-Item $vendorGs.FullName $inst -Force
+    } elseif (-not (Get-InstallerExe -Dest $inst -Urls @(
+            'https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs9561/gs9561w64.exe'))) {
+        $inst = $null
+    }
+    if ($inst) {
+        Write-Info 'Running the Ghostscript 9.56.1 installer /S ...'
+        Start-Process -FilePath $inst -ArgumentList '/S' -Wait
+    }
+    return (Find-GsExe)
 }
 
 function Get-Ghostscript {
@@ -625,24 +676,13 @@ function Get-Ghostscript {
     if ($gs) { return $gs }
 
     Write-Info 'Ghostscript not found - installing...'
-    if ($script:IsLegacyOs) {
-        # Win7: no winget, and current Ghostscript 10.x builds are not tested on
-        # Win7 - pin 9.56.1, the last release broadly verified there. Prefer an
-        # offline installer dropped into vendor\ (Win7 clients are often offline).
-        $inst = Join-Path $env:TEMP 'gs-setup.exe'
-        $vendorGs = Get-ChildItem $VendorDir -Filter 'gs*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($vendorGs -and (Test-IsExe $vendorGs.FullName)) {
-            Write-Info "Using vendored Ghostscript installer: $($vendorGs.Name)"
-            Copy-Item $vendorGs.FullName $inst -Force
-        } elseif (-not (Get-InstallerExe -Dest $inst -Urls @(
-                'https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs9561/gs9561w64.exe'))) {
-            $inst = $null
-        }
-        if ($inst) {
-            Write-Info 'Running the Ghostscript 9.56.1 installer /S ...'
-            Start-Process -FilePath $inst -ArgumentList '/S' -Wait
-        }
-        $gs = Find-GsExe
+    if ($script:NeedsLegacyGs) {
+        # Win7, or an early Win10 build (< 1809): current Ghostscript 10.x will
+        # install but its gsdll64.dll cannot load there, so go straight to the
+        # pinned 9.56.1 instead of installing something that fails every job.
+        Write-Info ('This OS (build ' + [Environment]::OSVersion.Version.Build +
+                    ') predates Ghostscript 10.x support - installing 9.56.1.')
+        $gs = Install-LegacyGhostscript
         if (-not $gs) {
             throw ('Ghostscript could not be installed. Download gs9561w64.exe ' +
                    '(https://ghostscript.com/releases/) into vendor\ and re-run.')
@@ -674,6 +714,13 @@ function Get-Ghostscript {
     } catch { Write-Warn2 "Ghostscript download failed: $($_.Exception.Message)" }
 
     $gs = Find-GsExe
+    if (-not $gs) {
+        # The latest Ghostscript installed but will not load on this OS (or did
+        # not install at all). Find-GsExe already rejected it, so fall back to
+        # the pinned 9.56.1 rather than leaving a machine that cannot convert.
+        Write-Warn2 'No working Ghostscript after installing the latest - falling back to 9.56.1.'
+        $gs = Install-LegacyGhostscript
+    }
     if (-not $gs) { throw 'Ghostscript could not be installed. Install it from https://ghostscript.com/releases/ and re-run.' }
     return $gs
 }
